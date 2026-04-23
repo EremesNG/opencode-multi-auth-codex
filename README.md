@@ -394,7 +394,7 @@ See [docs/gpt-5.4-fast-benchmark.md](./docs/gpt-5.4-fast-benchmark.md) for a con
 
 ### Notifications
 
-- `OPENCODE_MULTI_AUTH_NOTIFY`
+- `OPENCODE_MULTI_AUTH_NOTIFY=1` enables optional completion/retry/error notifications. Notifications are off by default so they cannot delay normal `opencode run` lifecycle.
 - `OPENCODE_MULTI_AUTH_NOTIFY_SOUND`
 - `OPENCODE_MULTI_AUTH_NOTIFY_MAC_OPEN`
 - `OPENCODE_MULTI_AUTH_NOTIFY_NTFY_URL`

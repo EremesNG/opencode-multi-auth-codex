@@ -231,7 +231,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
         return null;
     })();
     const notifyEnabledRaw = process.env.OPENCODE_MULTI_AUTH_NOTIFY;
-    const notifyEnabled = notifyEnabledRaw !== '0' && notifyEnabledRaw !== 'false';
+    const notifyEnabled = notifyEnabledRaw === '1' || notifyEnabledRaw === 'true';
     const notifySound = (process.env.OPENCODE_MULTI_AUTH_NOTIFY_SOUND || '/System/Library/Sounds/Glass.aiff').trim();
     const lastStatusBySession = new Map();
     const lastNotifiedAtByKey = new Map();
@@ -301,27 +301,6 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
     };
     const projectLabel = (project?.name || project?.id || '').trim() || 'OpenCode';
     const sessionMetaCache = new Map();
-    const getSessionMeta = async (sessionID) => {
-        const cached = sessionMetaCache.get(sessionID);
-        if (cached?.title)
-            return cached;
-        try {
-            const res = await client.session.get({
-                path: { id: sessionID },
-                query: { directory }
-            });
-            // @opencode-ai/sdk returns { data } shape.
-            const data = res?.data;
-            const meta = { title: data?.title };
-            sessionMetaCache.set(sessionID, meta);
-            return meta;
-        }
-        catch {
-            const meta = cached || {};
-            sessionMetaCache.set(sessionID, meta);
-            return meta;
-        }
-    };
     const formatTitle = (kind) => {
         if (kind === 'error')
             return `OpenCode - ${projectLabel} - Error`;
@@ -329,8 +308,8 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
             return `OpenCode - ${projectLabel} - Retrying`;
         return `OpenCode - ${projectLabel}`;
     };
-    const formatBody = async (kind, sessionID, detail) => {
-        const meta = await getSessionMeta(sessionID);
+    const formatBody = (kind, sessionID, detail) => {
+        const meta = sessionMetaCache.get(sessionID) || {};
         const titleLine = meta.title ? `Task: ${meta.title}` : '';
         const url = getSessionUrl(sessionID);
         if (kind === 'idle') {
@@ -341,8 +320,8 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
         }
         return [titleLine, `Error: ${sessionID}`, detail || '', url].filter(Boolean).join('\n');
     };
-    const notifyMacRich = async (kind, sessionID, detail) => {
-        const body = await formatBody(kind, sessionID, detail);
+    const notifyMacRich = (kind, sessionID, detail) => {
+        const body = formatBody(kind, sessionID, detail);
         notifyMac(formatTitle(kind), body, getSessionUrl(sessionID) || undefined);
     };
     const notifyNtfyRich = async (kind, sessionID, detail) => {
@@ -352,7 +331,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
             return;
         const sessionUrl = getSessionUrl(sessionID);
         const title = formatTitle(kind);
-        const body = await formatBody(kind, sessionID, detail);
+        const body = formatBody(kind, sessionID, detail);
         // ntfy priority: 1=min, 3=default, 5=max
         const priority = kind === 'error' ? '5' : kind === 'retry' ? '4' : '3';
         const headers = {
@@ -407,7 +386,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
     };
     const notifyRich = async (kind, sessionID, detail) => {
         try {
-            await notifyMacRich(kind, sessionID, detail);
+            notifyMacRich(kind, sessionID, detail);
         }
         catch {
             // ignore
@@ -452,7 +431,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                     const key = `retry:${sessionID}:${typeof attempt === 'number' ? attempt : 'na'}`;
                     if (shouldThrottle(key, 2000))
                         return;
-                    await notifyRich('retry', sessionID, formatRetryDetail(status));
+                    void notifyRich('retry', sessionID, formatRetryDetail(status));
                 }
                 return;
             }
@@ -464,7 +443,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                 const key = `error:${id}:${detail}`;
                 if (shouldThrottle(key, 2000))
                     return;
-                await notifyRich('error', id, detail);
+                void notifyRich('error', id, detail);
                 return;
             }
             if (event.type === 'session.idle') {
@@ -475,7 +454,7 @@ const MultiAuthPlugin = async ({ client, $, serverUrl, project, directory }) => 
                 if (prev === 'busy' || prev === 'retry') {
                     if (shouldThrottle(`idle:${sessionID}`, 2000))
                         return;
-                    await notifyRich('idle', sessionID);
+                    void notifyRich('idle', sessionID);
                 }
                 lastStatusBySession.set(sessionID, 'idle');
             }
