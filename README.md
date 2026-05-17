@@ -1,7 +1,7 @@
 # opencode-multi-auth-codex
 
 Multi-account OAuth rotation plugin for OpenCode with a local dashboard, force mode, weighted settings, limits probing, and reliability hardening.
-<img width="1659" height="888" alt="image" src="https://github.com/user-attachments/assets/c72b4d04-be1b-4222-9094-454c2105336f" />
+<img width="1659" height="888" alt="image" src="img/img.png" />
 
 ## Documentation map
 
