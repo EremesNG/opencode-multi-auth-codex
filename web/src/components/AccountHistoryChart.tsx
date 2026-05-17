@@ -31,6 +31,28 @@ function formatChartDate(at: number): string {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
+function getChartDomain(data: Array<{ pct: number }>): [number, number] {
+  const values = data.map((point) => point.pct)
+  if (values.length === 0) return [0, 100]
+
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const range = max - min
+  const padding = range < 2 ? 2 : Math.max(2, Math.ceil(range * 0.3))
+  const lower = Math.max(0, Math.floor(min - padding))
+  const upper = Math.min(100, Math.ceil(max + padding))
+
+  if (upper - lower >= 4) {
+    return [lower, upper]
+  }
+
+  if (upper === 100) {
+    return [Math.max(0, upper - 4), upper]
+  }
+
+  return [lower, Math.min(100, lower + 4)]
+}
+
 interface CustomTooltipProps {
   active?: boolean
   payload?: Array<{ payload: { at: number; pct: number } }>
@@ -115,6 +137,7 @@ export function AccountHistoryChart({
   resetAt
 }: AccountHistoryChartProps): JSX.Element {
   const data = useMemo(() => toRechartsData(history, type), [history, type])
+  const yDomain = useMemo(() => getChartDomain(data), [data])
 
   const label = type === 'fiveHour' ? '5-hour consumption history' : 'Weekly consumption history'
   const shortLabel = type === 'fiveHour' ? '5h' : '7d'
@@ -143,7 +166,7 @@ export function AccountHistoryChart({
       <ResponsiveContainer width="100%" height={120}>
         <AreaChart
           data={data}
-          margin={{ top: 4, right: 4, left: -20, bottom: 0 }}
+          margin={{ top: 4, right: 8, left: 2, bottom: 0 }}
           accessibilityLayer
         >
           <defs>
@@ -169,13 +192,13 @@ export function AccountHistoryChart({
             minTickGap={24}
           />
           <YAxis
-            domain={[0, 100]}
+            domain={yDomain}
             stroke="var(--text-muted)"
             fontSize={10}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v: number) => `${v}%`}
-            width={40}
+            width={34}
           />
           <Tooltip
             content={
@@ -194,8 +217,8 @@ export function AccountHistoryChart({
             stroke={strokeColor}
             strokeWidth={2}
             fill={`url(#${gradientId})`}
-            dot={{ r: 3, fill: strokeColor, strokeWidth: 0 }}
-            activeDot={{ r: 5, fill: strokeColor, stroke: '#fff', strokeWidth: 2 }}
+            dot={false}
+            activeDot={{ r: 4, fill: strokeColor, stroke: '#fff', strokeWidth: 1.5 }}
             animationDuration={600}
           />
         </AreaChart>
