@@ -1,11 +1,17 @@
 import { loadStore, saveStore, updateAccount } from './store.js'
 import { logInfo, logError } from './logger.js'
 import {
+  ALL_STICKY_IDENTITY_SOURCES,
   DEFAULT_FEATURE_FLAGS,
   DEFAULT_ROTATION_SETTINGS,
+  DEFAULT_STICKY_SESSION_SETTINGS,
   WEIGHTED_PRESETS,
   validateSettings,
   type RotationSettings,
+  type StickyIdentitySource,
+  type StickySessionAdminConfig,
+  type StickySessionSettings,
+  type PersistedStickySessionSettings,
   type WeightPreset,
   type SettingsValidationError
 } from './types.js'
@@ -16,6 +22,105 @@ export interface SettingsResult {
   settings: RotationSettings
   source: 'default' | 'persisted' | 'runtime' | 'env'
   errors?: SettingsValidationError[]
+}
+
+export interface StickySessionConfigResult {
+  config: StickySessionAdminConfig
+  source: 'default' | 'persisted'
+  errors?: SettingsValidationError[]
+}
+
+function getStoredStickySessionSettings(): PersistedStickySessionSettings | undefined {
+  const store = loadStore()
+  const sticky = store.stickySessions
+  if (!sticky) return undefined
+
+  return {
+    ...DEFAULT_STICKY_SESSION_SETTINGS,
+    ...sticky,
+    identitySources: Array.isArray(sticky.identitySources)
+      ? sticky.identitySources
+      : DEFAULT_STICKY_SESSION_SETTINGS.identitySources
+  }
+}
+
+function validateStickyIdentitySources(value: unknown): value is StickyIdentitySource[] {
+  return (
+    Array.isArray(value) &&
+    value.every((source) => typeof source === 'string' && ALL_STICKY_IDENTITY_SOURCES.includes(source as StickyIdentitySource))
+  )
+}
+
+export function validateStickySessionConfig(config: StickySessionAdminConfig): SettingsValidationError[] {
+  const errors: SettingsValidationError[] = []
+
+  if (typeof config.enabled !== 'boolean') {
+    errors.push({
+      field: 'enabled',
+      message: 'Enabled must be a boolean',
+      constraint: 'typeof enabled === boolean'
+    })
+  }
+
+  if (!validateStickyIdentitySources(config.identitySources)) {
+    errors.push({
+      field: 'identitySources',
+      message: 'Identity sources must be a non-empty array of supported sticky identity sources',
+      constraint: `identitySources ∈ ${ALL_STICKY_IDENTITY_SOURCES.join(', ')}`
+    })
+  } else {
+    if (config.identitySources.length === 0) {
+      errors.push({
+        field: 'identitySources',
+        message: 'At least one identity source is required',
+        constraint: 'identitySources.length > 0'
+      })
+    }
+
+    if (new Set(config.identitySources).size !== config.identitySources.length) {
+      errors.push({
+        field: 'identitySources',
+        message: 'Identity sources must not contain duplicates',
+        constraint: 'identitySources are unique'
+      })
+    }
+  }
+
+  if (typeof config.allowPromptCacheKey !== 'boolean') {
+    errors.push({
+      field: 'allowPromptCacheKey',
+      message: 'allowPromptCacheKey must be a boolean',
+      constraint: 'typeof allowPromptCacheKey === boolean'
+    })
+  }
+
+  if (
+    Array.isArray(config.identitySources) &&
+    config.identitySources.includes('body:prompt_cache_key') &&
+    config.allowPromptCacheKey !== true
+  ) {
+    errors.push({
+      field: 'identitySources',
+      message: 'body:prompt_cache_key requires allowPromptCacheKey to be true',
+      constraint: 'allowPromptCacheKey === true when body:prompt_cache_key is configured'
+    })
+  }
+
+  for (const [field, value] of [
+    ['ttlMs', config.ttlMs],
+    ['maxEntries', config.maxEntries],
+    ['maxFileBytes', config.maxFileBytes]
+  ] as const) {
+    if (!Number.isInteger(value) || value <= 0) {
+      errors.push({
+        field,
+        message: `${field} must be a positive integer`,
+        constraint: `${field} ∈ positive integers`
+      })
+    }
+  }
+
+  return errors
 }
 
 function resolveSettings(includeEnvOverrides: boolean): SettingsResult {
@@ -112,6 +217,84 @@ export function getRuntimeSettings(): SettingsResult {
   return resolveSettings(false)
 }
 
+export function getStickySessionRuntimeSettings(): StickySessionSettings {
+  const stored = getStoredStickySessionSettings()
+  return {
+    ...DEFAULT_STICKY_SESSION_SETTINGS,
+    ...stored,
+    identitySources: stored?.identitySources || DEFAULT_STICKY_SESSION_SETTINGS.identitySources
+  }
+}
+
+export function getStickySessionConfig(): StickySessionConfigResult {
+  const sticky = getStoredStickySessionSettings()
+  const enabled = getRuntimeSettings().settings.featureFlags?.stickySessionsEnabled === true
+  const config: StickySessionAdminConfig = {
+    enabled,
+    ...DEFAULT_STICKY_SESSION_SETTINGS,
+    ...sticky,
+    identitySources: sticky?.identitySources || DEFAULT_STICKY_SESSION_SETTINGS.identitySources
+  }
+  const errors = validateStickySessionConfig(config)
+
+  return {
+    config,
+    source: sticky ? 'persisted' : 'default',
+    errors: errors.length > 0 ? errors : undefined
+  }
+}
+
+export function updateStickySessionConfig(
+  updates: StickySessionAdminConfig,
+  actor: string = 'system'
+): { success: boolean; config?: StickySessionAdminConfig; errors?: SettingsValidationError[] } {
+  const now = Date.now()
+  const config: StickySessionAdminConfig = {
+    enabled: updates.enabled,
+    identitySources: updates.identitySources,
+    allowPromptCacheKey: updates.allowPromptCacheKey,
+    ttlMs: updates.ttlMs,
+    maxEntries: updates.maxEntries,
+    maxFileBytes: updates.maxFileBytes,
+    updatedAt: now,
+    updatedBy: actor
+  }
+
+  const errors = validateStickySessionConfig(config)
+  if (errors.length > 0) {
+    logError(`Sticky-session config update failed validation: ${errors.map(e => e.message).join(', ')}`)
+    return { success: false, errors }
+  }
+
+  const store = loadStore()
+  const current = getRuntimeSettings().settings
+  store.settings = {
+    ...DEFAULT_ROTATION_SETTINGS,
+    ...current,
+    featureFlags: {
+      ...DEFAULT_FEATURE_FLAGS,
+      ...(current.featureFlags || {}),
+      stickySessionsEnabled: config.enabled
+    },
+    updatedAt: now,
+    updatedBy: actor
+  }
+  store.rotationStrategy = store.settings.rotationStrategy
+  store.stickySessions = {
+    identitySources: [...config.identitySources],
+    allowPromptCacheKey: config.allowPromptCacheKey,
+    ttlMs: config.ttlMs,
+    maxEntries: config.maxEntries,
+    maxFileBytes: config.maxFileBytes,
+    updatedAt: now,
+    updatedBy: actor
+  }
+  saveStore(store)
+
+  logInfo(`Sticky-session config updated by ${actor}: ${JSON.stringify({ ...config, updatedAt: now, updatedBy: actor })}`)
+  return { success: true, config }
+}
+
 // Phase F: Update settings with validation
 export function updateSettings(
   updates: Partial<RotationSettings> & { featureFlags?: Partial<NonNullable<RotationSettings['featureFlags']>> },
@@ -180,12 +363,16 @@ export function applyPreset(
       accountWeights[alias] = weight
     })
   } else if (preset === 'conservative') {
-    // Weights based on limit health
+    // Weights based on limit health (normalized to percentages)
     accounts.forEach(alias => {
       const account = store.accounts[alias]
-      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? 50
-      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? 50
-      const health = (fiveHourRemaining + weeklyRemaining) / 2
+      const fiveHourLimit = account.rateLimits?.fiveHour?.limit ?? 100
+      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
+      const weeklyLimit = account.rateLimits?.weekly?.limit ?? 1000
+      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
+      const fiveHourPct = fiveHourLimit > 0 ? (fiveHourRemaining / fiveHourLimit) * 100 : 50
+      const weeklyPct = weeklyLimit > 0 ? (weeklyRemaining / weeklyLimit) * 100 : 50
+      const health = (fiveHourPct + weeklyPct) / 2
       accountWeights[alias] = health / 100
     })
     // Normalize to sum to 1
@@ -199,9 +386,13 @@ export function applyPreset(
     // Favor accounts with high usage (lower remaining)
     accounts.forEach(alias => {
       const account = store.accounts[alias]
-      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? 50
-      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? 50
-      const health = (fiveHourRemaining + weeklyRemaining) / 2
+      const fiveHourLimit = account.rateLimits?.fiveHour?.limit ?? 100
+      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
+      const weeklyLimit = account.rateLimits?.weekly?.limit ?? 1000
+      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
+      const fiveHourPct = fiveHourLimit > 0 ? (fiveHourRemaining / fiveHourLimit) * 100 : 50
+      const weeklyPct = weeklyLimit > 0 ? (weeklyRemaining / weeklyLimit) * 100 : 50
+      const health = (fiveHourPct + weeklyPct) / 2
       // Inverse: lower health = higher weight
       accountWeights[alias] = (100 - health) / 100
     })

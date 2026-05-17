@@ -2,12 +2,9 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { getStorePath, withWriteLock } from './store.js'
+import type { StickySessionSettings as StickySessionPolicy } from './types.js'
 
-export type StickySessionSettings = {
-  ttlMs: number
-  maxEntries: number
-  maxFileBytes: number
-}
+export type StickySessionSettings = StickySessionPolicy
 
 export type StickySessionEntry = {
   alias: string
@@ -19,6 +16,24 @@ export type StickySessionsFile = {
   version: 1
   updatedAt: number
   entries: Record<string, StickySessionEntry>
+}
+
+export type StickySessionCleanupResult = {
+  before: number
+  after: number
+  removed: number
+  prunedAt: number
+}
+
+export type StickySessionStatus = StickySessionCleanupResult & {
+  path: string
+  exists: boolean
+  entries: number
+  sizeBytes: number
+  updatedAt: number | null
+  ttlMs: number
+  maxEntries: number
+  maxFileBytes: number
 }
 
 const STICKY_SIDE_CAR_FILE = 'sticky-sessions.json'
@@ -48,6 +63,10 @@ function createEmptyStickySessions(now: number): StickySessionsFile {
 
 function getStickySessionsPath(): string {
   return path.join(path.dirname(getStorePath()), STICKY_SIDE_CAR_FILE)
+}
+
+export function getStickySessionsFilePath(): string {
+  return getStickySessionsPath()
 }
 
 function ensureStoreDir(): void {
@@ -331,5 +350,53 @@ export async function removeStickyAssignment(
     const pruned = pruneStickySessions(loaded, options.now, options.settings)
     writeStickySessionsToDisk(pruned)
     return pruned
+  })
+}
+
+export async function cleanupStickySessions(options: LoadStickySessionsOptions): Promise<StickySessionCleanupResult> {
+  return withWriteLock(() => {
+    const loaded = readStickySessionsSnapshot(options.now)
+    const before = Object.keys(loaded.entries).length
+    const pruned = pruneStickySessions(loaded, options.now, options.settings)
+    writeStickySessionsToDisk(pruned)
+
+    const after = Object.keys(pruned.entries).length
+    return {
+      before,
+      after,
+      removed: before - after,
+      prunedAt: options.now
+    }
+  })
+}
+
+export async function getStickySessionsStatus(options: LoadStickySessionsOptions): Promise<StickySessionStatus> {
+  return withWriteLock(() => {
+    const sidecarPath = getStickySessionsPath()
+    const beforeSnapshot = readStickySessionsSnapshot(options.now)
+    const before = Object.keys(beforeSnapshot.entries).length
+    const loaded = readStickySessionsFromDisk(options.now, options.settings)
+    const after = Object.keys(loaded.entries).length
+
+    if (fs.existsSync(sidecarPath)) {
+      writeStickySessionsToDisk(loaded)
+    }
+
+    const exists = fs.existsSync(sidecarPath)
+    const sizeBytes = exists ? fs.statSync(sidecarPath).size : 0
+    return {
+      path: sidecarPath,
+      exists,
+      entries: after,
+      sizeBytes,
+      updatedAt: exists ? loaded.updatedAt : null,
+      ttlMs: options.settings.ttlMs,
+      maxEntries: options.settings.maxEntries,
+      maxFileBytes: options.settings.maxFileBytes,
+      before,
+      after,
+      removed: before - after,
+      prunedAt: options.now
+    }
   })
 }

@@ -126,6 +126,8 @@ export interface AccountStore {
   rotationStrategy?: 'round-robin' | 'least-used' | 'random' | 'weighted-round-robin'
   // Phase F: Settings
   settings?: RotationSettings
+  // Phase G: Sticky-session admin config persisted separately from /api/settings
+  stickySessions?: PersistedStickySessionSettings
 }
 
 // OpenAI model info
@@ -219,6 +221,14 @@ export type StickyIdentitySource =
   | 'body:metadata.conversation_id'
   | 'body:prompt_cache_key'
 
+export const ALL_STICKY_IDENTITY_SOURCES: StickyIdentitySource[] = [
+  'header:session_id',
+  'header:conversation_id',
+  'body:metadata.session_id',
+  'body:metadata.conversation_id',
+  'body:prompt_cache_key'
+]
+
 // Phase G: Sticky-session policy shape (kept separate from the enablement flag)
 export interface StickySessionSettings {
   identitySources: StickyIdentitySource[]
@@ -226,6 +236,15 @@ export interface StickySessionSettings {
   ttlMs: number
   maxEntries: number
   maxFileBytes: number
+}
+
+export interface PersistedStickySessionSettings extends StickySessionSettings {
+  updatedAt?: number
+  updatedBy?: string
+}
+
+export interface StickySessionAdminConfig extends PersistedStickySessionSettings {
+  enabled: boolean
 }
 
 // Phase G: Canonical sticky identity resolved from a request

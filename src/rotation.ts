@@ -2,12 +2,12 @@ import { getStoreDiagnostics, loadStore, saveStore, updateAccount } from './stor
 import { ensureValidToken } from './auth.js'
 import { decodeJwtPayload, getPlanTypeFromClaims } from './codex-auth.js'
 import { isForceActive, checkAndAutoClearForce, getForceState, clearForce } from './force-mode.js'
-import { getRuntimeSettings, calculateWeightedSelection } from './settings.js'
+import { getRuntimeSettings, getStickySessionRuntimeSettings, calculateWeightedSelection } from './settings.js'
 import { getStickyAssignment, removeStickyAssignment, upsertStickyAssignment } from './sticky-sessions.js'
 import {
-  DEFAULT_STICKY_SESSION_SETTINGS,
   type AccountCredentials,
-  DEFAULT_CONFIG
+  DEFAULT_CONFIG,
+  type StickySessionSettings
 } from './types.js'
 import type { ResolvedStickyIdentity } from './types.js'
 
@@ -162,7 +162,8 @@ function classifyStickyFailure(
 async function persistStickySelection(
   sticky: ResolvedStickyIdentity | null | undefined,
   alias: string,
-  now: number
+  now: number,
+  stickySettings: StickySessionSettings
 ): Promise<void> {
   if (!sticky) return
 
@@ -170,7 +171,7 @@ async function persistStickySelection(
     canonicalIdentity: sticky.canonical,
     alias,
     now,
-    settings: DEFAULT_STICKY_SESSION_SETTINGS
+    settings: stickySettings
   })
 }
 
@@ -270,6 +271,7 @@ export async function getNextAccount(
   })()
 
   const runtimeSettings = getRuntimeSettings()
+  const stickySettings = getStickySessionRuntimeSettings()
   const rotationStrategy = runtimeSettings.settings.rotationStrategy || config.rotationStrategy
   const sticky =
     runtimeSettings.settings.featureFlags?.stickySessionsEnabled === true ? selection?.sticky ?? null : null
@@ -280,7 +282,7 @@ export async function getNextAccount(
       await getStickyAssignment({
         stickyHash: sticky.hash,
         now,
-        settings: DEFAULT_STICKY_SESSION_SETTINGS
+        settings: stickySettings
       })
     )?.alias
 
@@ -303,7 +305,7 @@ export async function getNextAccount(
             store.activeAlias = mappedAlias
             store.lastRotation = now
             saveStore(store)
-            await persistStickySelection(sticky, mappedAlias, now)
+            await persistStickySelection(sticky, mappedAlias, now, stickySettings)
 
             const currentForceState = getForceState()
             return {
@@ -329,7 +331,7 @@ export async function getNextAccount(
           await removeStickyAssignment({
             stickyHash: sticky.hash,
             now,
-            settings: DEFAULT_STICKY_SESSION_SETTINGS
+            settings: stickySettings
           })
         }
         console.warn('[multi-auth] No available accounts (rate-limited or invalidated).')
@@ -470,7 +472,7 @@ export async function getNextAccount(
       store.rotationIndex = nextIndex(candidate)
     }
     saveStore(store)
-    await persistStickySelection(sticky, candidate, now)
+    await persistStickySelection(sticky, candidate, now, stickySettings)
 
     const currentForceState = getForceState()
     return {
@@ -492,7 +494,7 @@ export async function getNextAccount(
     await removeStickyAssignment({
       stickyHash: sticky.hash,
       now,
-      settings: DEFAULT_STICKY_SESSION_SETTINGS
+      settings: stickySettings
     })
   }
 

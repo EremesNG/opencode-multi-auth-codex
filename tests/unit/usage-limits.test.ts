@@ -1,3 +1,4 @@
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
 import { jest } from '@jest/globals'
 import {
   classifyUsageApiFailure,

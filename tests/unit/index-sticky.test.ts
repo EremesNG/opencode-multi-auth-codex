@@ -1,8 +1,12 @@
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
+import { jest } from '@jest/globals'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
-import { jest } from '@jest/globals'
+
+const esmJest = jest as typeof jest & {
+  unstable_mockModule: (moduleName: string, factory: () => Record<string, unknown>) => void
+}
 
 describe('Sticky identity request plumbing', () => {
   async function loadIndexModule(): Promise<any> {
@@ -23,7 +27,13 @@ describe('Sticky identity request plumbing', () => {
         },
         prompt_cache_key: 'cache-123'
       },
-      allowPromptCacheKey: false
+      allowPromptCacheKey: false,
+      identitySources: [
+        'header:session_id',
+        'header:conversation_id',
+        'body:metadata.session_id',
+        'body:metadata.conversation_id'
+      ]
     })
 
     expect(sticky).toEqual({
@@ -42,7 +52,8 @@ describe('Sticky identity request plumbing', () => {
         metadata: {},
         prompt_cache_key: undefined
       },
-      allowPromptCacheKey: false
+      allowPromptCacheKey: false,
+      identitySources: ['header:session_id']
     })
 
     expect(sticky).toBeNull()
@@ -56,7 +67,8 @@ describe('Sticky identity request plumbing', () => {
       body: {
         prompt_cache_key: 'cache-only-123'
       },
-      allowPromptCacheKey: false
+      allowPromptCacheKey: false,
+      identitySources: ['body:prompt_cache_key']
     })
 
     expect(sticky).toBeNull()
@@ -129,6 +141,19 @@ describe('Sticky account-selection context plumbing', () => {
     stickyEnabled: boolean
     headers?: Record<string, string>
     body?: Record<string, unknown>
+    stickyConfig?: {
+      identitySources: Array<
+        'header:session_id' |
+        'header:conversation_id' |
+        'body:metadata.session_id' |
+        'body:metadata.conversation_id' |
+        'body:prompt_cache_key'
+      >
+      allowPromptCacheKey: boolean
+      ttlMs?: number
+      maxEntries?: number
+      maxFileBytes?: number
+    }
   }): Promise<{ getNextAccount: jest.Mock; fetchSpy: jest.SpyInstance }> {
     jest.resetModules()
 
@@ -144,7 +169,7 @@ describe('Sticky account-selection context plumbing', () => {
       token: createAccessToken('acct-123')
     } as any)
 
-    jest.unstable_mockModule('../../src/rotation.js', () => ({
+    esmJest.unstable_mockModule('../../src/rotation.js', () => ({
       getNextAccount,
       clearAuthInvalid: jest.fn(),
       markAuthInvalid: jest.fn(),
@@ -153,7 +178,7 @@ describe('Sticky account-selection context plumbing', () => {
       markWorkspaceDeactivated: jest.fn()
     }))
 
-    jest.unstable_mockModule('../../src/settings.js', () => ({
+    esmJest.unstable_mockModule('../../src/settings.js', () => ({
       getRuntimeSettings: () => ({
         settings: {
           rotationStrategy: 'round-robin',
@@ -166,6 +191,18 @@ describe('Sticky account-selection context plumbing', () => {
           }
         },
         source: 'persisted'
+      }),
+      getStickySessionRuntimeSettings: () => ({
+        identitySources: options.stickyConfig?.identitySources || [
+          'header:session_id',
+          'header:conversation_id',
+          'body:metadata.session_id',
+          'body:metadata.conversation_id'
+        ],
+        allowPromptCacheKey: options.stickyConfig?.allowPromptCacheKey ?? false,
+        ttlMs: options.stickyConfig?.ttlMs ?? 86_400_000,
+        maxEntries: options.stickyConfig?.maxEntries ?? 1000,
+        maxFileBytes: options.stickyConfig?.maxFileBytes ?? 1_048_576
       })
     }))
 
@@ -252,6 +289,34 @@ describe('Sticky account-selection context plumbing', () => {
     expect(noIdentity.getNextAccount).toHaveBeenCalledWith(
       expect.any(Object),
       { model: 'gpt-5.4' }
+    )
+  })
+
+  it('uses persisted sticky identity source ordering and prompt-cache authorization at runtime', async () => {
+    const { getNextAccount } = await invokePluginFetch({
+      stickyEnabled: true,
+      headers: {
+        session_id: 'session-should-be-ignored'
+      },
+      body: {
+        prompt_cache_key: 'cache-123'
+      },
+      stickyConfig: {
+        identitySources: ['body:prompt_cache_key'],
+        allowPromptCacheKey: true
+      }
+    })
+
+    expect(getNextAccount).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        model: 'gpt-5.4',
+        sticky: {
+          source: 'body:prompt_cache_key',
+          canonical: 'cache-123',
+          hash: expect.any(String)
+        }
+      })
     )
   })
 })

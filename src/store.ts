@@ -217,7 +217,8 @@ function validateStore(data: any): AccountStore | null {
     forcedBy: data.forcedBy ?? null,
     // Phase F: Preserve rotation strategy and settings
     rotationStrategy: data.rotationStrategy ?? 'round-robin',
-    settings: data.settings ?? undefined
+    settings: data.settings ?? undefined,
+    stickySessions: data.stickySessions ?? undefined
   }
 }
 

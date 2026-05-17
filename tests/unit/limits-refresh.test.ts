@@ -1,34 +1,39 @@
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
 import { jest } from '@jest/globals'
 import type { AccountCredentials } from '../../src/types.js'
 
+const esmJest = jest as typeof jest & {
+  unstable_mockModule: (moduleName: string, factory: () => Record<string, unknown>) => void
+}
+
 const updateAccount = jest.fn()
 const loadStore = jest.fn()
-const probeRateLimitsForAccount = jest.fn<() => Promise<any>>()
-const fetchUsageRateLimitsForAccount = jest.fn<() => Promise<any>>()
+const probeRateLimitsForAccount = jest.fn()
+const fetchUsageRateLimitsForAccount = jest.fn()
 const logError = jest.fn()
 const logInfo = jest.fn()
 const markAuthInvalid = jest.fn()
 const markWorkspaceDeactivated = jest.fn()
 
-jest.unstable_mockModule('../../src/store.js', () => ({
+esmJest.unstable_mockModule('../../src/store.js', () => ({
   loadStore,
   updateAccount
 }))
 
-jest.unstable_mockModule('../../src/probe-limits.js', () => ({
+esmJest.unstable_mockModule('../../src/probe-limits.js', () => ({
   probeRateLimitsForAccount
 }))
 
-jest.unstable_mockModule('../../src/usage-limits.js', () => ({
+esmJest.unstable_mockModule('../../src/usage-limits.js', () => ({
   fetchUsageRateLimitsForAccount
 }))
 
-jest.unstable_mockModule('../../src/logger.js', () => ({
+esmJest.unstable_mockModule('../../src/logger.js', () => ({
   logError,
   logInfo
 }))
 
-jest.unstable_mockModule('../../src/rotation.js', () => ({
+esmJest.unstable_mockModule('../../src/rotation.js', () => ({
   markAuthInvalid,
   markWorkspaceDeactivated
 }))

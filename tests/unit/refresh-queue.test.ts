@@ -1,20 +1,25 @@
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
 import { jest } from '@jest/globals'
 import type { AccountCredentials } from '../../src/types.js'
 
-const refreshRateLimitsForAccount = jest.fn<(account: AccountCredentials) => Promise<any>>()
+const esmJest = jest as typeof jest & {
+  unstable_mockModule: (moduleName: string, factory: () => Record<string, unknown>) => void
+}
+
+const refreshRateLimitsForAccount = jest.fn()
 const updateAccount = jest.fn()
 const logInfo = jest.fn()
 const logWarn = jest.fn()
 
-jest.unstable_mockModule('../../src/limits-refresh.js', () => ({
+esmJest.unstable_mockModule('../../src/limits-refresh.js', () => ({
   refreshRateLimitsForAccount
 }))
 
-jest.unstable_mockModule('../../src/store.js', () => ({
+esmJest.unstable_mockModule('../../src/store.js', () => ({
   updateAccount
 }))
 
-jest.unstable_mockModule('../../src/logger.js', () => ({
+esmJest.unstable_mockModule('../../src/logger.js', () => ({
   logInfo,
   logWarn
 }))
