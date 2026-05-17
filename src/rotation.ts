@@ -3,7 +3,13 @@ import { ensureValidToken } from './auth.js'
 import { decodeJwtPayload, getPlanTypeFromClaims } from './codex-auth.js'
 import { isForceActive, checkAndAutoClearForce, getForceState, clearForce } from './force-mode.js'
 import { getRuntimeSettings, calculateWeightedSelection } from './settings.js'
-import type { AccountCredentials, DEFAULT_CONFIG } from './types.js'
+import { getStickyAssignment, removeStickyAssignment, upsertStickyAssignment } from './sticky-sessions.js'
+import {
+  DEFAULT_STICKY_SESSION_SETTINGS,
+  type AccountCredentials,
+  DEFAULT_CONFIG
+} from './types.js'
+import type { ResolvedStickyIdentity } from './types.js'
 
 export interface RotationResult {
   account: AccountCredentials
@@ -17,6 +23,7 @@ export interface RotationResult {
 
 export interface AccountSelectionContext {
   model?: string
+  sticky?: ResolvedStickyIdentity | null
 }
 
 const HEALTH_HYSTERESIS_MS = 10_000
@@ -89,6 +96,8 @@ interface AccountHealth {
   priority: number
 }
 
+type StickyFailureDisposition = 'temporary' | 'permanent'
+
 function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHealth {
   const wasRateLimited: boolean = !!(acc.rateLimitedUntil && acc.rateLimitedUntil > now - HEALTH_HYSTERESIS_MS)
   const wasModelUnsupported: boolean = !!(acc.modelUnsupportedUntil && acc.modelUnsupportedUntil > now - HEALTH_HYSTERESIS_MS)
@@ -129,6 +138,40 @@ function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHea
     recentFailures,
     priority
   }
+}
+
+function classifyStickyFailure(
+  account: AccountCredentials | undefined,
+  now: number
+): StickyFailureDisposition {
+  if (!account || account.enabled === false || account.authInvalid) {
+    return 'permanent'
+  }
+
+  if (
+    (account.rateLimitedUntil && account.rateLimitedUntil > now) ||
+    (account.modelUnsupportedUntil && account.modelUnsupportedUntil > now) ||
+    (account.workspaceDeactivatedUntil && account.workspaceDeactivatedUntil > now)
+  ) {
+    return 'temporary'
+  }
+
+  return 'temporary'
+}
+
+async function persistStickySelection(
+  sticky: ResolvedStickyIdentity | null | undefined,
+  alias: string,
+  now: number
+): Promise<void> {
+  if (!sticky) return
+
+  await upsertStickyAssignment({
+    canonicalIdentity: sticky.canonical,
+    alias,
+    now,
+    settings: DEFAULT_STICKY_SESSION_SETTINGS
+  })
 }
 
 export async function getNextAccount(
@@ -219,11 +262,6 @@ export async function getNextAccount(
     return health?.isHealthy === true
   })
 
-  if (availableAliases.length === 0) {
-    console.warn('[multi-auth] No available accounts (rate-limited or invalidated).')
-    return null
-  }
-
   const tokenFailureCooldownMs = (() => {
     const raw = process.env.OPENCODE_MULTI_AUTH_TOKEN_FAILURE_COOLDOWN_MS
     const parsed = raw ? Number(raw) : NaN
@@ -233,6 +271,81 @@ export async function getNextAccount(
 
   const runtimeSettings = getRuntimeSettings()
   const rotationStrategy = runtimeSettings.settings.rotationStrategy || config.rotationStrategy
+  const sticky =
+    runtimeSettings.settings.featureFlags?.stickySessionsEnabled === true ? selection?.sticky ?? null : null
+  let stickyAliasToExclude: string | null = null
+
+  if (sticky) {
+    const mappedAlias = (
+      await getStickyAssignment({
+        stickyHash: sticky.hash,
+        now,
+        settings: DEFAULT_STICKY_SESSION_SETTINGS
+      })
+    )?.alias
+
+    if (mappedAlias) {
+      const mappedAccount = store.accounts[mappedAlias]
+      const mappedHealth = mappedAccount ? healthMap.get(mappedAlias) : undefined
+
+      if (mappedAccount && mappedHealth?.isHealthy) {
+        const token = await ensureValidToken(mappedAlias)
+        if (token) {
+          store = loadStore()
+          const latestMapped = store.accounts[mappedAlias]
+          if (latestMapped) {
+            store.accounts[mappedAlias] = {
+              ...latestMapped,
+              usageCount: (latestMapped.usageCount || 0) + 1,
+              lastUsed: now,
+              limitError: undefined
+            }
+            store.activeAlias = mappedAlias
+            store.lastRotation = now
+            saveStore(store)
+            await persistStickySelection(sticky, mappedAlias, now)
+
+            const currentForceState = getForceState()
+            return {
+              account: store.accounts[mappedAlias],
+              token,
+              forceState: {
+                active: isForceActive(),
+                alias: currentForceState.forcedAlias,
+                remainingMs: currentForceState.forcedUntil ? currentForceState.forcedUntil - now : 0
+              }
+            }
+          }
+        }
+
+        store = loadStore()
+      }
+
+      stickyAliasToExclude = mappedAlias
+      const replacementAliases = availableAliases.filter((alias) => alias !== mappedAlias)
+
+      if (replacementAliases.length === 0) {
+        if (classifyStickyFailure(store.accounts[mappedAlias], now) === 'permanent') {
+          await removeStickyAssignment({
+            stickyHash: sticky.hash,
+            now,
+            settings: DEFAULT_STICKY_SESSION_SETTINGS
+          })
+        }
+        console.warn('[multi-auth] No available accounts (rate-limited or invalidated).')
+        return null
+      }
+    }
+  }
+
+  const selectionPool = stickyAliasToExclude
+    ? availableAliases.filter((alias) => alias !== stickyAliasToExclude)
+    : availableAliases
+
+  if (selectionPool.length === 0) {
+    console.warn('[multi-auth] No available accounts (rate-limited or invalidated).')
+    return null
+  }
 
   const buildCandidates = (candidateAliases: string[]): { aliases: string[]; nextIndex?: (selected: string) => number } => {
     switch (rotationStrategy) {
@@ -328,7 +441,7 @@ export async function getNextAccount(
     }
   }
 
-  const { primaryAliases, fallbackAliases } = getPreferredPools(store, availableAliases, selection)
+  const { primaryAliases, fallbackAliases } = getPreferredPools(store, selectionPool, selection)
   const primary = buildCandidates(primaryAliases)
   const fallback = fallbackAliases.length > 0 ? buildCandidates(fallbackAliases) : { aliases: [] as string[] }
   const candidates = [...primary.aliases, ...fallback.aliases]
@@ -357,6 +470,7 @@ export async function getNextAccount(
       store.rotationIndex = nextIndex(candidate)
     }
     saveStore(store)
+    await persistStickySelection(sticky, candidate, now)
 
     const currentForceState = getForceState()
     return {
@@ -368,6 +482,18 @@ export async function getNextAccount(
         remainingMs: currentForceState.forcedUntil ? currentForceState.forcedUntil - now : 0
       }
     }
+  }
+
+  if (
+    sticky &&
+    stickyAliasToExclude &&
+    classifyStickyFailure(loadStore().accounts[stickyAliasToExclude], now) === 'permanent'
+  ) {
+    await removeStickyAssignment({
+      stickyHash: sticky.hash,
+      now,
+      settings: DEFAULT_STICKY_SESSION_SETTINGS
+    })
   }
 
   console.error('[multi-auth] No available accounts (token refresh failed on all candidates).')

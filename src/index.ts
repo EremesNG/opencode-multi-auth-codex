@@ -20,7 +20,14 @@ import { getDefaultModels } from './models.js'
 import { getForceState, isForceActive } from './force-mode.js'
 import { getRuntimeSettings } from './settings.js'
 import { listAccounts, updateAccount, loadStore } from './store.js'
-import { DEFAULT_CONFIG, type AccountRateLimits, type PluginConfig } from './types.js'
+import { hashStickyIdentity } from './sticky-sessions.js'
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_STICKY_SESSION_SETTINGS,
+  type AccountRateLimits,
+  type PluginConfig
+} from './types.js'
+import type { ResolvedStickyIdentity, StickyIdentitySource } from './types.js'
 import { Errors, type DeterministicError } from './errors.js'
 
 const PROVIDER_ID = 'openai'
@@ -158,6 +165,59 @@ function isSparkModel(model: string | undefined): boolean {
 
 function supportsFastMode(model: string | undefined): boolean {
   return model === 'gpt-5.5' || model === 'gpt-5.4'
+}
+
+type ResolveStickyIdentityOptions = {
+  headers: Headers
+  body?: {
+    metadata?: {
+      session_id?: unknown
+      conversation_id?: unknown
+    }
+    session_id?: unknown
+    conversation_id?: unknown
+    prompt_cache_key?: unknown
+  }
+  allowPromptCacheKey: boolean
+}
+
+function normalizeStickyIdentityValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  return normalized.length > 0 ? normalized : null
+}
+
+function resolveStickyIdentitySource(
+  source: StickyIdentitySource,
+  value: unknown,
+  allowPromptCacheKey: boolean
+): ResolvedStickyIdentity | null {
+  if (source === 'body:prompt_cache_key' && !allowPromptCacheKey) return null
+
+  const canonical = normalizeStickyIdentityValue(value)
+  if (!canonical) return null
+
+  return {
+    source,
+    canonical,
+    hash: hashStickyIdentity(canonical)
+  }
+}
+
+export function resolveStickyIdentity(options: ResolveStickyIdentityOptions): ResolvedStickyIdentity | null {
+  const headerSessionId = options.headers.get('session_id')
+  const headerConversationId = options.headers.get('conversation_id')
+
+  const body = options.body
+  const bodyMetadata = body?.metadata
+
+  return (
+    resolveStickyIdentitySource('header:session_id', headerSessionId, options.allowPromptCacheKey) ||
+    resolveStickyIdentitySource('header:conversation_id', headerConversationId, options.allowPromptCacheKey) ||
+    resolveStickyIdentitySource('body:metadata.session_id', bodyMetadata?.session_id, options.allowPromptCacheKey) ||
+    resolveStickyIdentitySource('body:metadata.conversation_id', bodyMetadata?.conversation_id, options.allowPromptCacheKey) ||
+    resolveStickyIdentitySource('body:prompt_cache_key', body?.prompt_cache_key, options.allowPromptCacheKey)
+  )
 }
 
 function ensureContentType(headers: Headers): Headers {
@@ -658,8 +718,17 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
               rotationStrategy: settings.settings.rotationStrategy
             }
 
+            const sticky = settings.settings.featureFlags?.stickySessionsEnabled
+              ? resolveStickyIdentity({
+                  headers: new Headers(init?.headers || {}),
+                  body,
+                  allowPromptCacheKey: DEFAULT_STICKY_SESSION_SETTINGS.allowPromptCacheKey
+                })
+              : null
+
             const rotation = await getNextAccount(effectiveConfig, {
-              model: normalizedModel
+              model: normalizedModel,
+              ...(sticky ? { sticky } : {})
             })
 
             if (!rotation) {

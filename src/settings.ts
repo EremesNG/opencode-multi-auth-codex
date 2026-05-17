@@ -1,6 +1,7 @@
 import { loadStore, saveStore, updateAccount } from './store.js'
 import { logInfo, logError } from './logger.js'
 import {
+  DEFAULT_FEATURE_FLAGS,
   DEFAULT_ROTATION_SETTINGS,
   WEIGHTED_PRESETS,
   validateSettings,
@@ -26,9 +27,17 @@ function resolveSettings(includeEnvOverrides: boolean): SettingsResult {
   
   // Layer 1: Persisted settings from store
   if (store.settings) {
+    const persistedFeatureFlags = store.settings.featureFlags
     settings = {
       ...settings,
-      ...store.settings
+      ...store.settings,
+      featureFlags: persistedFeatureFlags
+        ? {
+            ...DEFAULT_FEATURE_FLAGS,
+            ...settings.featureFlags,
+            ...persistedFeatureFlags
+          }
+        : settings.featureFlags
     }
     source = 'persisted'
   }
@@ -64,8 +73,20 @@ function resolveSettings(includeEnvOverrides: boolean): SettingsResult {
     if (envAntigravity) {
       const enabled = envAntigravity.toLowerCase() === 'true' || envAntigravity === '1'
       settings.featureFlags = {
+        ...DEFAULT_FEATURE_FLAGS,
         ...(settings.featureFlags || {}),
         antigravityEnabled: enabled
+      }
+      source = 'env'
+    }
+
+    const envStickySessions = process.env.OPENCODE_MULTI_AUTH_STICKY_SESSIONS_ENABLED
+    if (envStickySessions) {
+      const enabled = envStickySessions.toLowerCase() === 'true' || envStickySessions === '1'
+      settings.featureFlags = {
+        ...DEFAULT_FEATURE_FLAGS,
+        ...(settings.featureFlags || {}),
+        stickySessionsEnabled: enabled
       }
       source = 'env'
     }
@@ -93,7 +114,7 @@ export function getRuntimeSettings(): SettingsResult {
 
 // Phase F: Update settings with validation
 export function updateSettings(
-  updates: Partial<RotationSettings>,
+  updates: Partial<RotationSettings> & { featureFlags?: Partial<NonNullable<RotationSettings['featureFlags']>> },
   actor: string = 'system'
 ): { success: boolean; settings?: RotationSettings; errors?: SettingsValidationError[] } {
   const current = getRuntimeSettings()
@@ -102,6 +123,11 @@ export function updateSettings(
   const newSettings: RotationSettings = {
     ...current.settings,
     ...updates,
+    featureFlags: {
+      ...DEFAULT_FEATURE_FLAGS,
+      ...(current.settings.featureFlags || {}),
+      ...(updates.featureFlags || {})
+    },
     updatedAt: Date.now(),
     updatedBy: actor
   }

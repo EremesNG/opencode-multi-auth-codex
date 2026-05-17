@@ -201,11 +201,52 @@ export interface RotationSettings {
 export interface FeatureFlags {
   // Antigravity integration (default: false)
   antigravityEnabled: boolean
+  // Sticky-session routing/persistence gate (default: false)
+  stickySessionsEnabled?: boolean
 }
 
 // Phase G: Default feature flags
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
-  antigravityEnabled: false
+  antigravityEnabled: false,
+  stickySessionsEnabled: false
+}
+
+// Phase G: Sticky identity sources used for canonical request matching
+export type StickyIdentitySource =
+  | 'header:session_id'
+  | 'header:conversation_id'
+  | 'body:metadata.session_id'
+  | 'body:metadata.conversation_id'
+  | 'body:prompt_cache_key'
+
+// Phase G: Sticky-session policy shape (kept separate from the enablement flag)
+export interface StickySessionSettings {
+  identitySources: StickyIdentitySource[]
+  allowPromptCacheKey: boolean
+  ttlMs: number
+  maxEntries: number
+  maxFileBytes: number
+}
+
+// Phase G: Canonical sticky identity resolved from a request
+export interface ResolvedStickyIdentity {
+  source: StickyIdentitySource
+  canonical: string
+  hash: string
+}
+
+// Phase G: Default sticky-session policy constants
+export const DEFAULT_STICKY_SESSION_SETTINGS: StickySessionSettings = {
+  identitySources: [
+    'header:session_id',
+    'header:conversation_id',
+    'body:metadata.session_id',
+    'body:metadata.conversation_id'
+  ],
+  allowPromptCacheKey: false,
+  ttlMs: 24 * 60 * 60 * 1000,
+  maxEntries: 1000,
+  maxFileBytes: 1024 * 1024
 }
 
 // Phase F: Weighted rotation presets
