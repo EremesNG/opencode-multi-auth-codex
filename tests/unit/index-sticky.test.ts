@@ -8,13 +8,74 @@ const esmJest = jest as typeof jest & {
   unstable_mockModule: (moduleName: string, factory: () => Record<string, unknown>) => void
 }
 
-describe('Sticky identity request plumbing', () => {
-  async function loadIndexModule(): Promise<any> {
-    return import('../../src/index.js') as Promise<any>
-  }
+const mockGetNextAccount = jest.fn()
+const mockClearAuthInvalid = jest.fn()
+const mockMarkAuthInvalid = jest.fn()
+const mockMarkModelUnsupported = jest.fn()
+const mockMarkRateLimited = jest.fn()
+const mockMarkWorkspaceDeactivated = jest.fn()
 
+const defaultStickyConfig = {
+  identitySources: [
+    'header:session_id',
+    'header:conversation_id',
+    'body:metadata.session_id',
+    'body:metadata.conversation_id'
+  ] as Array<
+    'header:session_id' |
+    'header:conversation_id' |
+    'body:metadata.session_id' |
+    'body:metadata.conversation_id' |
+    'body:prompt_cache_key'
+  >,
+  allowPromptCacheKey: false,
+  ttlMs: 86_400_000,
+  maxEntries: 1000,
+  maxFileBytes: 1_048_576
+}
+
+let stickyEnabledState = false
+let stickyConfigState = { ...defaultStickyConfig }
+let originalFetch: typeof globalThis.fetch | undefined
+let mockFetch: jest.Mock | undefined
+
+let MultiAuthPlugin: typeof import('../../src/index.js').default
+
+beforeAll(async () => {
+  await Promise.all([
+    esmJest.unstable_mockModule('../../src/rotation', () => ({
+      getNextAccount: mockGetNextAccount,
+      clearAuthInvalid: mockClearAuthInvalid,
+      markAuthInvalid: mockMarkAuthInvalid,
+      markModelUnsupported: mockMarkModelUnsupported,
+      markRateLimited: mockMarkRateLimited,
+      markWorkspaceDeactivated: mockMarkWorkspaceDeactivated
+    })),
+    esmJest.unstable_mockModule('../../src/settings', () => ({
+      getRuntimeSettings: () => ({
+        settings: {
+          rotationStrategy: 'round-robin',
+          criticalThreshold: 10,
+          lowThreshold: 30,
+          accountWeights: {},
+          featureFlags: {
+            antigravityEnabled: false,
+            stickySessionsEnabled: stickyEnabledState
+          }
+        },
+        source: 'persisted'
+      }),
+      getStickySessionRuntimeSettings: () => ({
+        ...stickyConfigState
+      })
+    }))
+  ])
+  ;({ default: MultiAuthPlugin } = await import('../../src/index.js'))
+})
+
+describe('Sticky identity request plumbing', () => {
   it('resolves the canonical sticky identity when an allowlisted identity is explicitly allowed', async () => {
-    const { resolveStickyIdentity } = await loadIndexModule()
+    const { resolveStickyIdentity } = await import('../../src/sticky-identity.js')
 
     const sticky = resolveStickyIdentity({
       headers: new Headers({
@@ -44,7 +105,7 @@ describe('Sticky identity request plumbing', () => {
   })
 
   it('returns null when no canonical sticky identity can be derived', async () => {
-    const { resolveStickyIdentity } = await loadIndexModule()
+    const { resolveStickyIdentity } = await import('../../src/sticky-identity.js')
 
     const sticky = resolveStickyIdentity({
       headers: new Headers(),
@@ -60,7 +121,7 @@ describe('Sticky identity request plumbing', () => {
   })
 
   it('does not derive sticky identity from prompt_cache_key without explicit authorization', async () => {
-    const { resolveStickyIdentity } = await loadIndexModule()
+    const { resolveStickyIdentity } = await import('../../src/sticky-identity.js')
 
     const sticky = resolveStickyIdentity({
       headers: new Headers(),
@@ -121,16 +182,31 @@ describe('Sticky account-selection context plumbing', () => {
   }
 
   beforeEach(() => {
-    jest.restoreAllMocks()
+    jest.clearAllMocks()
+    stickyEnabledState = false
+    stickyConfigState = { ...defaultStickyConfig }
     process.env = {
       ...originalEnv,
       OPENCODE_MULTI_AUTH_STORE_DIR: testDir,
       OPENCODE_MULTI_AUTH_STORE_FILE: testStoreFile
     }
     seedStore()
+    originalFetch = globalThis.fetch
+    mockFetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+    globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch
   })
 
   afterEach(() => {
+    if (originalFetch) {
+      globalThis.fetch = originalFetch
+      originalFetch = undefined
+    }
+    mockFetch = undefined
     process.env = originalEnv
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true })
@@ -154,10 +230,17 @@ describe('Sticky account-selection context plumbing', () => {
       maxEntries?: number
       maxFileBytes?: number
     }
-  }): Promise<{ getNextAccount: jest.Mock; fetchSpy: jest.SpyInstance }> {
-    jest.resetModules()
+  }): Promise<{ getNextAccount: jest.Mock; fetchSpy: jest.Mock }> {
+    mockGetNextAccount.mockClear()
+    mockFetch?.mockClear()
+    stickyEnabledState = options.stickyEnabled
+    stickyConfigState = {
+      ...defaultStickyConfig,
+      ...options.stickyConfig,
+      identitySources: options.stickyConfig?.identitySources || defaultStickyConfig.identitySources
+    }
 
-    const getNextAccount = jest.fn().mockResolvedValue({
+    mockGetNextAccount.mockResolvedValue({
       account: {
         alias: 'alpha',
         accessToken: 'access-alpha',
@@ -169,51 +252,6 @@ describe('Sticky account-selection context plumbing', () => {
       token: createAccessToken('acct-123')
     } as any)
 
-    esmJest.unstable_mockModule('../../src/rotation.js', () => ({
-      getNextAccount,
-      clearAuthInvalid: jest.fn(),
-      markAuthInvalid: jest.fn(),
-      markModelUnsupported: jest.fn(),
-      markRateLimited: jest.fn(),
-      markWorkspaceDeactivated: jest.fn()
-    }))
-
-    esmJest.unstable_mockModule('../../src/settings.js', () => ({
-      getRuntimeSettings: () => ({
-        settings: {
-          rotationStrategy: 'round-robin',
-          criticalThreshold: 10,
-          lowThreshold: 30,
-          accountWeights: {},
-          featureFlags: {
-            antigravityEnabled: false,
-            stickySessionsEnabled: options.stickyEnabled
-          }
-        },
-        source: 'persisted'
-      }),
-      getStickySessionRuntimeSettings: () => ({
-        identitySources: options.stickyConfig?.identitySources || [
-          'header:session_id',
-          'header:conversation_id',
-          'body:metadata.session_id',
-          'body:metadata.conversation_id'
-        ],
-        allowPromptCacheKey: options.stickyConfig?.allowPromptCacheKey ?? false,
-        ttlMs: options.stickyConfig?.ttlMs ?? 86_400_000,
-        maxEntries: options.stickyConfig?.maxEntries ?? 1000,
-        maxFileBytes: options.stickyConfig?.maxFileBytes ?? 1_048_576
-      })
-    }))
-
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' }
-      })
-    )
-
-    const { default: MultiAuthPlugin } = await import('../../src/index.js')
     const hooks = await MultiAuthPlugin({
       client: {},
       $: (() => ({ nothrow: () => ({ catch: () => undefined }) })) as any,
@@ -223,17 +261,56 @@ describe('Sticky account-selection context plumbing', () => {
     } as any)
 
     const auth = await (hooks as any).auth.loader(async () => null as any, {} as any)
-    await auth.fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: options.headers,
-      body: JSON.stringify({
-        model: 'gpt-5.4',
-        stream: false,
-        ...options.body
+    if (typeof auth?.fetch === 'function') {
+      await auth.fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: options.headers,
+        body: JSON.stringify({
+          model: 'gpt-5.4',
+          stream: false,
+          ...options.body
+        })
       })
-    })
+    }
 
-    return { getNextAccount, fetchSpy }
+    return { getNextAccount: mockGetNextAccount, fetchSpy: mockFetch as jest.Mock }
+  }
+
+  function headersToRecord(headers: unknown): Record<string, string> {
+    if (!headers) {
+      return {}
+    }
+
+    if (headers instanceof Headers) {
+      return Object.fromEntries(headers.entries())
+    }
+
+    if (Array.isArray(headers)) {
+      return Object.fromEntries(headers as Array<[string, string]>)
+    }
+
+    if (typeof headers === 'object') {
+      return Object.fromEntries(
+        Object.entries(headers as Record<string, unknown>).map(([key, value]) => [key.toLowerCase(), String(value)])
+      )
+    }
+
+    return {}
+  }
+
+  function callHeaders(call: unknown[]): Record<string, string> {
+    const first = call[0]
+    const second = call[1]
+
+    if (second && typeof second === 'object' && 'headers' in (second as Record<string, unknown>)) {
+      return headersToRecord((second as Record<string, unknown>).headers)
+    }
+
+    if (first instanceof Request) {
+      return headersToRecord(first.headers)
+    }
+
+    return {}
   }
 
   it('passes sticky context into getNextAccount only when the sticky flag is enabled and a canonical identity exists', async () => {
@@ -259,9 +336,9 @@ describe('Sticky account-selection context plumbing', () => {
       })
     )
 
-    const headers = fetchSpy.mock.calls[0]?.[1]?.headers as Headers
-    expect(headers.get('conversation_id')).toBe('cache-123')
-    expect(headers.get('session_id')).toBe('cache-123')
+    const headers = callHeaders(fetchSpy.mock.calls[0] ?? [])
+    expect(headers.conversation_id).toBe('cache-123')
+    expect(headers.session_id).toBe('cache-123')
   })
 
   it('keeps non-sticky selection unchanged when the sticky flag is disabled or no canonical identity exists', async () => {
@@ -275,10 +352,8 @@ describe('Sticky account-selection context plumbing', () => {
       }
     })
 
-    expect(disabled.getNextAccount).toHaveBeenCalledWith(
-      expect.any(Object),
-      { model: 'gpt-5.4' }
-    )
+    expect(disabled.getNextAccount).toHaveBeenCalledWith(expect.any(Object), { model: 'gpt-5.4' })
+    expect(disabled.fetchSpy).toBeDefined()
 
     const noIdentity = await invokePluginFetch({
       stickyEnabled: true,
@@ -286,14 +361,12 @@ describe('Sticky account-selection context plumbing', () => {
       body: {}
     })
 
-    expect(noIdentity.getNextAccount).toHaveBeenCalledWith(
-      expect.any(Object),
-      { model: 'gpt-5.4' }
-    )
+    expect(noIdentity.getNextAccount).toHaveBeenCalledWith(expect.any(Object), { model: 'gpt-5.4' })
+    expect(noIdentity.fetchSpy).toBeDefined()
   })
 
   it('uses persisted sticky identity source ordering and prompt-cache authorization at runtime', async () => {
-    const { getNextAccount } = await invokePluginFetch({
+    const { getNextAccount, fetchSpy } = await invokePluginFetch({
       stickyEnabled: true,
       headers: {
         session_id: 'session-should-be-ignored'
@@ -318,5 +391,9 @@ describe('Sticky account-selection context plumbing', () => {
         }
       })
     )
+
+    const headers = callHeaders(fetchSpy.mock.calls[0] ?? [])
+    expect(headers.conversation_id).toBe('cache-123')
+    expect(headers.session_id).toBe('cache-123')
   })
 })

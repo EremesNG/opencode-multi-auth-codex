@@ -20,7 +20,8 @@ import { getDefaultModels } from './models.js'
 import { getForceState, isForceActive } from './force-mode.js'
 import { getRuntimeSettings, getStickySessionRuntimeSettings } from './settings.js'
 import { listAccounts, updateAccount, loadStore } from './store.js'
-import { hashStickyIdentity } from './sticky-sessions.js'
+import { resolveStickyIdentity } from './sticky-identity.js'
+import { extractErrorMessage, isCyberPolicyError } from './cyber-policy.js'
 import {
   DEFAULT_CONFIG,
   type AccountRateLimits,
@@ -166,116 +167,12 @@ function supportsFastMode(model: string | undefined): boolean {
   return model === 'gpt-5.5' || model === 'gpt-5.4'
 }
 
-type ResolveStickyIdentityOptions = {
-  headers: Headers
-  body?: {
-    metadata?: {
-      session_id?: unknown
-      conversation_id?: unknown
-    }
-    session_id?: unknown
-    conversation_id?: unknown
-    prompt_cache_key?: unknown
-  }
-  allowPromptCacheKey: boolean
-  identitySources: StickyIdentitySource[]
-}
-
-function normalizeStickyIdentityValue(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  const normalized = value.trim().toLowerCase()
-  return normalized.length > 0 ? normalized : null
-}
-
-function resolveStickyIdentitySource(
-  source: StickyIdentitySource,
-  value: unknown,
-  allowPromptCacheKey: boolean
-): ResolvedStickyIdentity | null {
-  if (source === 'body:prompt_cache_key' && !allowPromptCacheKey) return null
-
-  const canonical = normalizeStickyIdentityValue(value)
-  if (!canonical) return null
-
-  return {
-    source,
-    canonical,
-    hash: hashStickyIdentity(canonical)
-  }
-}
-
-export function resolveStickyIdentity(options: ResolveStickyIdentityOptions): ResolvedStickyIdentity | null {
-  const body = options.body
-  const bodyMetadata = body?.metadata
-
-  for (const source of options.identitySources) {
-    const value = (() => {
-      switch (source) {
-        case 'header:session_id':
-          return options.headers.get('session_id')
-        case 'header:conversation_id':
-          return options.headers.get('conversation_id')
-        case 'body:metadata.session_id':
-          return bodyMetadata?.session_id
-        case 'body:metadata.conversation_id':
-          return bodyMetadata?.conversation_id
-        case 'body:prompt_cache_key':
-          return body?.prompt_cache_key
-      }
-    })()
-    const resolved = resolveStickyIdentitySource(source, value, options.allowPromptCacheKey)
-    if (resolved) return resolved
-  }
-
-  return null
-}
-
 function ensureContentType(headers: Headers): Headers {
   const responseHeaders = new Headers(headers)
   if (!responseHeaders.has('content-type')) {
     responseHeaders.set('content-type', 'text/event-stream; charset=utf-8')
   }
   return responseHeaders
-}
-
-function extractErrorMessage(payload: any, fallbackText: string = ''): string {
-  if (!payload || typeof payload !== 'object') {
-    return fallbackText
-  }
-
-  const detailMessage = typeof payload?.detail?.message === 'string'
-    ? payload.detail.message
-    : typeof payload?.detail === 'string'
-      ? payload.detail
-      : ''
-
-  const errorMessage = typeof payload?.error?.message === 'string'
-    ? payload.error.message
-    : ''
-
-  const topLevelMessage = typeof payload?.message === 'string'
-    ? payload.message
-    : ''
-
-  return detailMessage || errorMessage || topLevelMessage || fallbackText
-}
-
-function extractErrorCode(payload: any): string {
-  if (!payload || typeof payload !== 'object') return ''
-
-  return (
-    (typeof payload?.detail?.code === 'string' && payload.detail.code) ||
-    (typeof payload?.error?.code === 'string' && payload.error.code) ||
-    (typeof payload?.code === 'string' && payload.code) ||
-    ''
-  )
-}
-
-export function isCyberPolicyError(payload: any, fallbackText: string = ''): boolean {
-  const code = extractErrorCode(payload).toLowerCase()
-  const text = `${extractErrorMessage(payload, fallbackText)} ${fallbackText}`.toLowerCase()
-
-  return code === 'cyber_policy' || text.includes('cyber_policy')
 }
 
 function resolveRateLimitedUntil(
