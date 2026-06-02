@@ -1,5 +1,5 @@
 import { refreshRateLimitsForAccount, type LimitRefreshResult } from './limits-refresh.js'
-import { updateAccount } from './store.js'
+import { setMetrics } from './metrics-store.js'
 import { logInfo, logWarn } from './logger.js'
 import type { AccountCredentials } from './types.js'
 
@@ -110,7 +110,7 @@ async function runQueue(targets: AccountCredentials[]): Promise<void> {
   if (queueState && stopRequested && nextIndexRef.value < targets.length) {
     for (let idx = nextIndexRef.value; idx < targets.length; idx += 1) {
       const account = targets[idx]
-      updateAccount(account.alias, { limitStatus: 'stopped', limitError: 'Stopped by user' })
+      setMetrics(account.alias, { limitStatus: 'stopped', limitError: 'Stopped by user' })
       queueState.results.push({ alias: account.alias, updated: false, error: 'Stopped' })
       queueState.completed += 1
     }
@@ -161,7 +161,7 @@ export function startRefreshQueue(accounts: AccountCredentials[], alias?: string
   }
 
   for (const account of targets) {
-    updateAccount(account.alias, { limitStatus: 'queued', limitError: undefined })
+    setMetrics(account.alias, { limitStatus: 'queued', limitError: undefined })
   }
 
   logInfo(`Limit refresh queue started (${targets.length} accounts, concurrency ${concurrency})`)

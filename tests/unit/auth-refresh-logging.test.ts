@@ -10,6 +10,7 @@ const updateAccount = jest.fn()
 const clearAuthInvalid = jest.fn()
 const logError = jest.fn()
 const logInfo = jest.fn()
+const setMetrics = jest.fn()
 
 esmJest.unstable_mockModule('../../src/store.js', () => ({
   loadStore,
@@ -24,6 +25,10 @@ esmJest.unstable_mockModule('../../src/rotation.js', () => ({
 esmJest.unstable_mockModule('../../src/logger.js', () => ({
   logError,
   logInfo
+}))
+
+esmJest.unstable_mockModule('../../src/metrics-store.js', () => ({
+  setMetrics
 }))
 
 let refreshToken: typeof import('../../src/auth.js').refreshToken
@@ -130,6 +135,7 @@ describe('refreshToken logging', () => {
     const result = await refreshToken('alpha')
 
     expect(result).toEqual(expect.objectContaining({ alias: 'alpha' }))
+    expect(setMetrics).toHaveBeenCalledWith('alpha', expect.objectContaining({ lastRefresh: expect.any(String) }))
     expect(clearAuthInvalid).toHaveBeenCalledWith('alpha')
     expect(logInfo).toHaveBeenCalledWith(expect.stringContaining('Token refreshed for alpha'))
     fetchMock.mockRestore()

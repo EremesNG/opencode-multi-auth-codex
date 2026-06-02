@@ -20,6 +20,7 @@ import { getDefaultModels } from './models.js'
 import { getForceState, isForceActive } from './force-mode.js'
 import { getRuntimeSettings, getStickySessionRuntimeSettings } from './settings.js'
 import { listAccounts, updateAccount, loadStore } from './store.js'
+import { registerMetricsFlushHooks, updateRateLimits } from './metrics-store.js'
 import { resolveStickyIdentity } from './sticky-identity.js'
 import { extractErrorMessage, isCyberPolicyError } from './cyber-policy.js'
 import {
@@ -248,6 +249,8 @@ async function convertSseToJson(response: Response, headers: Headers): Promise<R
  * Rotates between multiple ChatGPT Plus/Pro accounts for rate limit resilience.
  */
 const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, directory }: PluginInput) => {
+  registerMetricsFlushHooks()
+
   const terminalNotifierPath = (() => {
     const candidates = [
       '/opt/homebrew/bin/terminal-notifier',
@@ -779,10 +782,10 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
                   : account.rateLimits
                 if (limitUpdate) {
                   const blockingResetAt = getBlockingRateLimitResetAt(mergedRateLimits)
-                  updateAccount(account.alias, {
-                    rateLimits: mergedRateLimits,
-                    rateLimitedUntil: blockingResetAt
-                  })
+                  if (mergedRateLimits) {
+                    updateRateLimits(account.alias, mergedRateLimits)
+                  }
+                  updateAccount(account.alias, { rateLimitedUntil: blockingResetAt })
                 }
 
                 return mergedRateLimits

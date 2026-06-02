@@ -4,6 +4,7 @@ import { decodeJwtPayload, getPlanTypeFromClaims } from './codex-auth.js'
 import { isForceActive, checkAndAutoClearForce, getForceState, clearForce } from './force-mode.js'
 import { getRuntimeSettings, getStickySessionRuntimeSettings, calculateWeightedSelection } from './settings.js'
 import { getStickyAssignment, removeStickyAssignment, upsertStickyAssignment } from './sticky-sessions.js'
+import { getMetrics, setMetrics, type MetricsData } from './metrics-store.js'
 import {
   type AccountCredentials,
   DEFAULT_CONFIG,
@@ -28,6 +29,21 @@ export interface AccountSelectionContext {
 
 const HEALTH_HYSTERESIS_MS = 10_000
 const RECENT_FAILURE_WINDOW_MS = 60_000
+
+const ALLOCATOR_ACCOUNT_METRIC_FIELDS = [
+  'lastRefresh',
+  'lastSeenAt',
+  'lastActiveUntil',
+  'lastUsed',
+  'usageCount',
+  'rateLimits',
+  'rateLimitHistory',
+  'limitStatus',
+  'limitError',
+  'lastLimitProbeAt',
+  'lastLimitErrorAt',
+  'limitsConfidence'
+] as const
 
 function shuffled<T>(input: T[]): T[] {
   const a = [...input]
@@ -58,6 +74,58 @@ function isProAccount(acc: AccountCredentials): boolean {
 
 function isSparkModel(model: string | undefined): boolean {
   return typeof model === 'string' && model.startsWith('gpt-5.3-codex-spark')
+}
+
+function getAccountMetrics(alias: string): MetricsData {
+  return getMetrics(alias) ?? {}
+}
+
+function getMetricUsageCount(alias: string, acc: AccountCredentials | undefined): number {
+  const metrics = getAccountMetrics(alias)
+  return typeof metrics.usageCount === 'number' ? metrics.usageCount : acc?.usageCount ?? 0
+}
+
+function getMetricLastUsed(alias: string, acc: AccountCredentials | undefined): number {
+  const metrics = getAccountMetrics(alias)
+  return typeof metrics.lastUsed === 'number' ? metrics.lastUsed : acc?.lastUsed ?? 0
+}
+
+function withAllocatorMetrics(
+  alias: string,
+  acc: AccountCredentials,
+  metrics: MetricsData = getAccountMetrics(alias)
+): AccountCredentials {
+  return {
+    ...acc,
+    usageCount: typeof metrics.usageCount === 'number' ? metrics.usageCount : acc.usageCount ?? 0,
+    lastUsed: typeof metrics.lastUsed === 'number' ? metrics.lastUsed : acc.lastUsed,
+    limitError: metrics.limitError,
+    lastLimitErrorAt: typeof metrics.lastLimitErrorAt === 'number' ? metrics.lastLimitErrorAt : acc.lastLimitErrorAt
+  }
+}
+
+function incrementAllocatorUsage(alias: string, now: number): MetricsData {
+  const current = getAccountMetrics(alias)
+  return setMetrics(alias, {
+    usageCount: (current.usageCount ?? 0) + 1,
+    lastUsed: now,
+    limitError: undefined
+  })
+}
+
+function stripMetricsFromAccount(acc: AccountCredentials): AccountCredentials {
+  const next = { ...acc } as Record<string, unknown>
+  for (const field of ALLOCATOR_ACCOUNT_METRIC_FIELDS) {
+    delete next[field]
+  }
+  return next as unknown as AccountCredentials
+}
+
+function saveAllocatorState(store: ReturnType<typeof loadStore>): void {
+  store.accounts = Object.fromEntries(
+    Object.entries(store.accounts).map(([alias, account]) => [alias, stripMetricsFromAccount(account)])
+  ) as Record<string, AccountCredentials>
+  saveStore(store)
 }
 
 function getPreferredPools(
@@ -98,7 +166,8 @@ interface AccountHealth {
 
 type StickyFailureDisposition = 'temporary' | 'permanent'
 
-function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHealth {
+function evaluateAccountHealth(alias: string, acc: AccountCredentials, now: number): AccountHealth {
+  const metrics = getAccountMetrics(alias)
   const wasRateLimited: boolean = !!(acc.rateLimitedUntil && acc.rateLimitedUntil > now - HEALTH_HYSTERESIS_MS)
   const wasModelUnsupported: boolean = !!(acc.modelUnsupportedUntil && acc.modelUnsupportedUntil > now - HEALTH_HYSTERESIS_MS)
   const wasWorkspaceDeactivated: boolean = !!(acc.workspaceDeactivatedUntil && acc.workspaceDeactivatedUntil > now - HEALTH_HYSTERESIS_MS)
@@ -116,7 +185,7 @@ function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHea
   const isInProbation: boolean = !currentlyBlocked && (wasRateLimited || wasModelUnsupported || wasWorkspaceDeactivated)
   
   let recentFailures = 0
-  if (acc.lastLimitErrorAt && acc.lastLimitErrorAt > now - RECENT_FAILURE_WINDOW_MS) {
+  if (metrics.lastLimitErrorAt && metrics.lastLimitErrorAt > now - RECENT_FAILURE_WINDOW_MS) {
     recentFailures++
   }
   if (acc.authInvalidatedAt && acc.authInvalidatedAt > now - RECENT_FAILURE_WINDOW_MS) {
@@ -126,7 +195,7 @@ function evaluateAccountHealth(acc: AccountCredentials, now: number): AccountHea
   let priority = 100
   if (isInProbation) priority -= 30
   if (recentFailures > 0) priority -= recentFailures * 10
-  if (acc.usageCount === 0) priority -= 5
+  if ((metrics.usageCount ?? acc.usageCount) === 0) priority -= 5
   if (currentlyBlocked) priority = 0
   // Phase D: Disabled accounts get lowest priority
   if (isDisabled) priority = -1
@@ -212,24 +281,21 @@ export async function getNextAccount(
     const forcedAccount = store.accounts[forcedAlias]
     
     if (forcedAccount) {
-      const health = evaluateAccountHealth(forcedAccount, now)
+      const health = evaluateAccountHealth(forcedAlias, forcedAccount, now)
       
       if (health.isHealthy) {
         const token = await ensureValidToken(forcedAlias)
         if (token) {
-          store = updateAccount(forcedAlias, {
-            usageCount: (forcedAccount.usageCount || 0) + 1,
-            lastUsed: now,
-            limitError: undefined
-          })
+          const updatedMetrics = incrementAllocatorUsage(forcedAlias, now)
+          store = loadStore()
           
           store.activeAlias = forcedAlias
           store.lastRotation = now
-          saveStore(store)
+          saveAllocatorState(store)
           
           console.log(`[multi-auth] Force mode: using ${forcedAlias}`)
           return {
-            account: store.accounts[forcedAlias],
+            account: withAllocatorMetrics(forcedAlias, store.accounts[forcedAlias], updatedMetrics),
             token,
             forceState: {
               active: true,
@@ -255,7 +321,7 @@ export async function getNextAccount(
   const healthMap = new Map<string, AccountHealth>()
   for (const alias of aliases) {
     const acc = store.accounts[alias]
-    healthMap.set(alias, evaluateAccountHealth(acc, now))
+    healthMap.set(alias, evaluateAccountHealth(alias, acc, now))
   }
 
   const availableAliases = aliases.filter(alias => {
@@ -293,23 +359,17 @@ export async function getNextAccount(
       if (mappedAccount && mappedHealth?.isHealthy) {
         const token = await ensureValidToken(mappedAlias)
         if (token) {
+          const updatedMetrics = incrementAllocatorUsage(mappedAlias, now)
           store = loadStore()
-          const latestMapped = store.accounts[mappedAlias]
-          if (latestMapped) {
-            store.accounts[mappedAlias] = {
-              ...latestMapped,
-              usageCount: (latestMapped.usageCount || 0) + 1,
-              lastUsed: now,
-              limitError: undefined
-            }
+          if (store.accounts[mappedAlias]) {
             store.activeAlias = mappedAlias
             store.lastRotation = now
-            saveStore(store)
+            saveAllocatorState(store)
             await persistStickySelection(sticky, mappedAlias, now, stickySettings)
 
             const currentForceState = getForceState()
             return {
-              account: store.accounts[mappedAlias],
+              account: withAllocatorMetrics(mappedAlias, store.accounts[mappedAlias], updatedMetrics),
               token,
               forceState: {
                 active: isForceActive(),
@@ -361,9 +421,9 @@ export async function getNextAccount(
           const priorityDiff = (healthB?.priority || 0) - (healthA?.priority || 0)
           if (priorityDiff !== 0) return priorityDiff
           
-          const usageDiff = (aa?.usageCount || 0) - (bb?.usageCount || 0)
+          const usageDiff = getMetricUsageCount(a, aa) - getMetricUsageCount(b, bb)
           if (usageDiff !== 0) return usageDiff
-          const lastDiff = (aa?.lastUsed || 0) - (bb?.lastUsed || 0)
+          const lastDiff = getMetricLastUsed(a, aa) - getMetricLastUsed(b, bb)
           if (lastDiff !== 0) return lastDiff
           return a.localeCompare(b)
         })
@@ -451,19 +511,23 @@ export async function getNextAccount(
   for (const candidate of candidates) {
     const token = await ensureValidToken(candidate)
     if (!token) {
-      store = updateAccount(candidate, {
-        rateLimitedUntil: now + tokenFailureCooldownMs,
+      setMetrics(candidate, {
         limitError: '[multi-auth] Token unavailable (refresh failed?)',
         lastLimitErrorAt: now
       })
+      store = loadStore()
+      if (store.accounts[candidate]) {
+        store.accounts[candidate] = {
+          ...store.accounts[candidate],
+          rateLimitedUntil: now + tokenFailureCooldownMs
+        }
+        saveAllocatorState(store)
+      }
       continue
     }
 
-    store = updateAccount(candidate, {
-      usageCount: (store.accounts[candidate]?.usageCount || 0) + 1,
-      lastUsed: now,
-      limitError: undefined
-    })
+    const updatedMetrics = incrementAllocatorUsage(candidate, now)
+    store = loadStore()
 
     store.activeAlias = candidate
     store.lastRotation = now
@@ -471,12 +535,12 @@ export async function getNextAccount(
     if (nextIndex) {
       store.rotationIndex = nextIndex(candidate)
     }
-    saveStore(store)
+    saveAllocatorState(store)
     await persistStickySelection(sticky, candidate, now, stickySettings)
 
     const currentForceState = getForceState()
     return {
-      account: store.accounts[candidate],
+      account: withAllocatorMetrics(candidate, store.accounts[candidate], updatedMetrics),
       token,
       forceState: {
         active: isForceActive(),

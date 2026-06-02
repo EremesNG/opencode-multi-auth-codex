@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type * as http from 'node:http'
 import { once } from 'node:events'
+import { writeDashboardSandbox } from '../helpers/dashboard-seed.js'
 
 const SANDBOX_ROOT = path.join(os.tmpdir(), 'oma-dashboard-parity-configuration-sandbox')
 const STORE_FILE = path.join(SANDBOX_ROOT, 'accounts.json')
@@ -49,70 +50,7 @@ async function closeServer(server: http.Server): Promise<void> {
 }
 
 function seedSandbox(): void {
-  fs.rmSync(SANDBOX_ROOT, { recursive: true, force: true })
-  fs.mkdirSync(SANDBOX_ROOT, { recursive: true })
-  fs.writeFileSync(AUTH_FILE, JSON.stringify({ OPENAI_API_KEY: null, tokens: {} }, null, 2))
-
-  fs.writeFileSync(
-    STORE_FILE,
-    JSON.stringify(
-      {
-        version: 2,
-        activeAlias: 'alpha',
-        rotationIndex: 0,
-        lastRotation: 1_700_000_000_000,
-        rotationStrategy: 'round-robin',
-        settings: {
-          rotationStrategy: 'round-robin',
-          criticalThreshold: 10,
-          lowThreshold: 30,
-          accountWeights: {},
-          featureFlags: {
-            antigravityEnabled: false,
-            stickySessionsEnabled: true
-          }
-        },
-        accounts: {
-          alpha: {
-            alias: 'alpha',
-            accessToken: 'token-alpha',
-            refreshToken: 'refresh-alpha',
-            expiresAt: Date.now() + 60_000,
-            email: 'alpha@example.com',
-            usageCount: 3,
-            enabled: true,
-            tags: ['core'],
-            notes: 'primary account',
-            source: 'opencode',
-            rateLimits: {
-              fiveHour: { limit: 100, remaining: 80, resetAt: Date.now() + 60_000, updatedAt: Date.now() },
-              weekly: { limit: 1000, remaining: 700, resetAt: Date.now() + 120_000, updatedAt: Date.now() }
-            },
-            limitsConfidence: 'fresh'
-          },
-          beta: {
-            alias: 'beta',
-            accessToken: 'token-beta',
-            refreshToken: 'refresh-beta',
-            expiresAt: Date.now() + 120_000,
-            email: 'beta@example.com',
-            usageCount: 7,
-            enabled: true,
-            tags: ['backup'],
-            notes: 'secondary account',
-            source: 'codex',
-            rateLimits: {
-              fiveHour: { limit: 100, remaining: 50, resetAt: Date.now() + 60_000, updatedAt: Date.now() },
-              weekly: { limit: 1000, remaining: 450, resetAt: Date.now() + 120_000, updatedAt: Date.now() }
-            },
-            limitsConfidence: 'stale'
-          }
-        }
-      },
-      null,
-      2
-    )
-  )
+  writeDashboardSandbox({ root: SANDBOX_ROOT, storeFile: STORE_FILE, authFile: AUTH_FILE, stickyEnabled: true })
 }
 
 beforeAll(async () => {

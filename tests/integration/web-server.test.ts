@@ -1,3 +1,5 @@
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
+import { jest } from '@jest/globals'
 import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as os from 'node:os'
@@ -82,6 +84,32 @@ afterAll(() => {
 })
 
 describe('web server hardening', () => {
+  it('registers metrics shutdown flush hooks once when the web console starts', async () => {
+    const port = await getFreePort()
+    const secondPort = await getFreePort()
+    const processOnSpy = jest.spyOn(process, 'on')
+    jest.resetModules()
+    const { startWebConsole: isolatedStartWebConsole } = await import('../../src/web.js')
+    const server = isolatedStartWebConsole({ host: '127.0.0.1', port })
+    const serverListening = once(server, 'listening')
+    const secondServer = isolatedStartWebConsole({ host: '127.0.0.1', port: secondPort })
+    const secondServerListening = once(secondServer, 'listening')
+
+    try {
+      await Promise.all([serverListening, secondServerListening])
+      const hookCalls = processOnSpy.mock.calls.filter((call: any[]) => ['beforeExit', 'SIGINT', 'SIGTERM', 'exit'].includes(call[0]))
+      expect(hookCalls.map((call: any[]) => call[0])).toEqual(['beforeExit', 'SIGINT', 'SIGTERM', 'exit'])
+      for (const [event, listener] of hookCalls as Array<[NodeJS.Signals | 'beforeExit' | 'exit', (...args: any[]) => void]>) {
+        process.removeListener(event, listener)
+      }
+    } finally {
+      await closeServer(server)
+      await closeServer(secondServer)
+      processOnSpy.mockRestore()
+      fs.unwatchFile(getCodexAuthPath())
+    }
+  })
+
   it('rejects non-loopback host binding', () => {
     expect(() => startWebConsole({ host: '0.0.0.0', port: 4120 })).toThrow(/LOCALHOST_ONLY|localhost/i)
   })

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import * as http from 'http'
 import * as url from 'url'
 import { addAccount, updateAccount, loadStore } from './store.js'
+import { setMetrics } from './metrics-store.js'
 import { clearAuthInvalid } from './rotation.js'
 import {
   decodeJwtPayload,
@@ -223,11 +224,13 @@ export async function loginAccount(
           planType,
           expiresAt,
           email,
-          lastRefresh: new Date(now).toISOString(),
-          lastSeenAt: now,
           source: 'opencode',
           authInvalid: false,
           authInvalidatedAt: undefined
+        })
+        setMetrics(alias, {
+          lastRefresh: new Date(now).toISOString(),
+          lastSeenAt: now
         })
 
         const account = store.accounts[alias]
@@ -318,7 +321,6 @@ async function performRefreshToken(alias: string): Promise<AccountCredentials | 
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token || account.refreshToken,
       expiresAt,
-      lastRefresh: new Date().toISOString(),
       idToken: tokens.id_token || account.idToken,
       accountId:
         getAccountIdFromClaims(idClaims) ||
@@ -331,6 +333,7 @@ async function performRefreshToken(alias: string): Promise<AccountCredentials | 
     }
 
     const updatedStore = updateAccount(alias, updates)
+    setMetrics(alias, { lastRefresh: new Date().toISOString() })
     clearAuthInvalid(alias)
     logInfo(`[multi-auth] Token refreshed for ${alias}`)
 

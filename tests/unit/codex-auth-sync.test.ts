@@ -36,8 +36,13 @@ async function loadSandboxModules(sandboxRoot: string) {
   }
 
   const store = await import('../../src/store.js')
+  const metricsStore = await import('../../src/metrics-store.js')
   const codexAuth = await import('../../src/codex-auth.js')
-  return { store, codexAuth }
+  return { store, metricsStore, codexAuth }
+}
+
+function readJson(file: string): any {
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 
 describe('syncCodexAuthFile token freshness', () => {
@@ -54,7 +59,7 @@ describe('syncCodexAuthFile token freshness', () => {
   })
 
   it('does not overwrite newer stored credentials with older auth.json tokens', async () => {
-    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    const { store, metricsStore, codexAuth } = await loadSandboxModules(sandboxRoot)
     const storedAccessToken = jwt(authClaims(200, 1_200))
     const authAccessToken = jwt(authClaims(100, 1_100))
 
@@ -88,11 +93,15 @@ describe('syncCodexAuthFile token freshness', () => {
     expect(account.refreshToken).toBe('stored-refresh-token')
     expect(account.idToken).toBe('stored-id-token')
     expect(account.expiresAt).toBe(1_200_000)
-    expect(account.lastSeenAt).toEqual(expect.any(Number))
+    expect(readJson(path.join(sandboxRoot, 'accounts.json')).accounts.alpha).not.toHaveProperty('lastSeenAt')
+    expect(metricsStore.getMetrics('alpha')).toEqual(expect.objectContaining({
+      lastSeenAt: expect.any(Number),
+      lastRefresh: '2026-01-01T00:00:00.000Z'
+    }))
   })
 
   it('updates stored credentials when auth.json has newer tokens', async () => {
-    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    const { store, metricsStore, codexAuth } = await loadSandboxModules(sandboxRoot)
     const storedAccessToken = jwt(authClaims(100, 1_100))
     const authAccessToken = jwt(authClaims(200, 1_200))
 
@@ -126,5 +135,35 @@ describe('syncCodexAuthFile token freshness', () => {
     expect(account.refreshToken).toBe('newer-auth-refresh-token')
     expect(account.idToken).toBe('newer-auth-id-token')
     expect(account.expiresAt).toBe(1_200_000)
+    expect(readJson(path.join(sandboxRoot, 'accounts.json')).accounts.alpha).not.toHaveProperty('lastRefresh')
+    expect(metricsStore.getMetrics('alpha')).toEqual(expect.objectContaining({
+      lastSeenAt: expect.any(Number),
+      lastRefresh: '2026-01-01T00:00:00.000Z'
+    }))
+  })
+
+  it('keeps writeCodexAuthForAlias sync telemetry in metrics only', async () => {
+    const { store, metricsStore, codexAuth } = await loadSandboxModules(sandboxRoot)
+    const storedAccessToken = jwt(authClaims(300, 1_300))
+    store.addAccount('alpha', {
+      accessToken: storedAccessToken,
+      refreshToken: 'stored-refresh-token',
+      idToken: 'stored-id-token',
+      accountId: 'acct-alpha',
+      expiresAt: 1_300_000,
+      email: 'alpha@example.com',
+      source: 'opencode'
+    })
+
+    codexAuth.writeCodexAuthForAlias('alpha')
+
+    const persistedAccount = readJson(path.join(sandboxRoot, 'accounts.json')).accounts.alpha
+    expect(persistedAccount.source).toBe('codex')
+    expect(persistedAccount).not.toHaveProperty('lastRefresh')
+    expect(persistedAccount).not.toHaveProperty('lastSeenAt')
+    expect(metricsStore.getMetrics('alpha')).toEqual(expect.objectContaining({
+      lastRefresh: expect.any(String),
+      lastSeenAt: expect.any(Number)
+    }))
   })
 })

@@ -8,7 +8,7 @@ import { exec, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js'
 import { getCodexAuthPath, getCodexAuthStatus, getCodexAuthSummary, resolveAliasForCurrentAuth, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js'
-import { getStoreStatus, listAccounts, loadStore, removeAccount, updateAccount } from './store.js'
+import { getStoreStatus, listAccounts, loadStore, loadStoreWithMetrics, removeAccount, updateAccount } from './store.js'
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js'
 import { getLogPath, logError, logInfo, logWarn, readLogTail } from './logger.js'
 import { getForceState, activateForce, clearForce, isForceActive, getRemainingForceTimeMs, formatForceDuration } from './force-mode.js'
@@ -24,6 +24,7 @@ import {
 import { Errors } from './errors.js'
 import type { AccountCredentials, RateLimitWindow, LimitsConfidence, RotationSettings, WeightPreset } from './types.js'
 import { cleanupStickySessions, getStickySessionsStatus } from './sticky-sessions.js'
+import { registerMetricsFlushHooks } from './metrics-store.js'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 3434
@@ -1176,6 +1177,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
     throw new Error(`${err.code}: ${err.message}`)
   }
 
+  registerMetricsFlushHooks()
   runSync()
   startAuthWatcher()
 
@@ -1187,7 +1189,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
 
     if (req.method === 'GET' && path === '/api/state') {
       runSync()
-      const store = loadStore()
+      const store = loadStoreWithMetrics()
       const rawAccounts = Object.values(store.accounts)
       const accounts = rawAccounts.map(scrubAccount)
       const deviceAlias = resolveAliasForCurrentAuth(store)
@@ -1464,7 +1466,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
     
     // GET /api/accounts - List all accounts with metadata
     if (req.method === 'GET' && path === '/api/accounts') {
-      const store = loadStore()
+      const store = loadStoreWithMetrics()
       const accounts = Object.values(store.accounts).map(acc => ({
         alias: acc.alias,
         email: acc.email,

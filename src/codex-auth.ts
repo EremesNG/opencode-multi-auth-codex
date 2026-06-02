@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { addAccount, loadStore, updateAccount } from './store.js'
+import { setMetrics } from './metrics-store.js'
 import { logInfo } from './logger.js'
 import type { AccountCredentials } from './types.js'
 
@@ -361,8 +362,6 @@ export function syncCodexAuthFile(): {
     planType,
     expiresAt,
     email,
-    lastRefresh: normalized.lastRefresh,
-    lastSeenAt: now,
     source: 'codex'
   }
   if (normalized.idToken) {
@@ -382,11 +381,13 @@ export function syncCodexAuthFile(): {
     } else {
       updateAccount(alias, update)
     }
+    setMetrics(alias, { lastRefresh: normalized.lastRefresh, lastSeenAt: now })
     return { alias, added: false, updated: true, authEmail: email, authAccountId: accountId }
   }
 
   const newAlias = buildAlias(email, accountId, store)
   addAccount(newAlias, update as Omit<AccountCredentials, 'alias' | 'usageCount'>)
+  setMetrics(newAlias, { lastRefresh: normalized.lastRefresh, lastSeenAt: now })
   return { alias: newAlias, added: true, updated: true, authEmail: email, authAccountId: accountId }
 }
 
@@ -424,8 +425,10 @@ export function writeCodexAuthForAlias(alias: string): void {
 
   writeCodexAuthFile(auth)
   updateAccount(alias, {
-    lastRefresh: auth.last_refresh,
-    lastSeenAt: Date.now(),
     source: 'codex'
+  })
+  setMetrics(alias, {
+    lastRefresh: auth.last_refresh,
+    lastSeenAt: Date.now()
   })
 }

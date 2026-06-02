@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type * as http from 'node:http'
 import { once } from 'node:events'
+import { writeDashboardSandbox } from '../helpers/dashboard-seed.js'
 
 const SANDBOX_ROOT = path.join(os.tmpdir(), 'oma-dashboard-sticky-session-admin-sandbox')
 const STORE_FILE = path.join(SANDBOX_ROOT, 'accounts.json')
@@ -53,44 +54,13 @@ async function closeServer(server: http.Server): Promise<void> {
 }
 
 function seedSandbox(options?: { stickyEnabled?: boolean }): void {
-  fs.rmSync(SANDBOX_ROOT, { recursive: true, force: true })
-  fs.mkdirSync(SANDBOX_ROOT, { recursive: true })
-  fs.writeFileSync(AUTH_FILE, JSON.stringify({ OPENAI_API_KEY: null, tokens: {} }, null, 2))
-  fs.writeFileSync(
-    STORE_FILE,
-    JSON.stringify(
-      {
-        version: 2,
-        activeAlias: 'alpha',
-        rotationIndex: 0,
-        lastRotation: 1_700_000_000_000,
-        rotationStrategy: 'round-robin',
-        settings: {
-          rotationStrategy: 'round-robin',
-          criticalThreshold: 10,
-          lowThreshold: 30,
-          accountWeights: {},
-          featureFlags: {
-            antigravityEnabled: false,
-            stickySessionsEnabled: options?.stickyEnabled ?? true
-          }
-        },
-        accounts: {
-          alpha: {
-            alias: 'alpha',
-            accessToken: 'token-alpha',
-            refreshToken: 'refresh-alpha',
-            expiresAt: Date.now() + 60_000,
-            email: 'alpha@example.com',
-            usageCount: 3,
-            enabled: true
-          }
-        }
-      },
-      null,
-      2
-    )
-  )
+  writeDashboardSandbox({
+    root: SANDBOX_ROOT,
+    storeFile: STORE_FILE,
+    authFile: AUTH_FILE,
+    stickyEnabled: options?.stickyEnabled ?? true,
+    accountSet: 'alpha'
+  })
 }
 
 function seedStickySidecar(now: number): void {

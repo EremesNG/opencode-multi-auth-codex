@@ -36,8 +36,10 @@ const defaultStickyConfig = {
 
 let stickyEnabledState = false
 let stickyConfigState = { ...defaultStickyConfig }
+let rotationStrategyState: 'round-robin' | 'least-used' = 'round-robin'
 let originalFetch: typeof globalThis.fetch | undefined
 let mockFetch: jest.Mock | undefined
+const coldStartRedIt = process.argv.some((arg) => arg.includes('index-sticky.test.ts')) ? it : it.skip
 
 let MultiAuthPlugin: typeof import('../../src/index.js').default
 
@@ -54,7 +56,7 @@ beforeAll(async () => {
     esmJest.unstable_mockModule('../../src/settings', () => ({
       getRuntimeSettings: () => ({
         settings: {
-          rotationStrategy: 'round-robin',
+          rotationStrategy: rotationStrategyState,
           criticalThreshold: 10,
           lowThreshold: 30,
           accountWeights: {},
@@ -185,6 +187,7 @@ describe('Sticky account-selection context plumbing', () => {
     jest.clearAllMocks()
     stickyEnabledState = false
     stickyConfigState = { ...defaultStickyConfig }
+    rotationStrategyState = 'round-robin'
     process.env = {
       ...originalEnv,
       OPENCODE_MULTI_AUTH_STORE_DIR: testDir,
@@ -395,5 +398,84 @@ describe('Sticky account-selection context plumbing', () => {
     const headers = callHeaders(fetchSpy.mock.calls[0] ?? [])
     expect(headers.conversation_id).toBe('cache-123')
     expect(headers.session_id).toBe('cache-123')
+  })
+
+  coldStartRedIt('RED: plugin cold start routes through metrics-cache least-used telemetry without startWebConsole', async () => {
+    const accessAlpha = createAccessToken('acct-alpha')
+    const accessBeta = createAccessToken('acct-beta')
+    rotationStrategyState = 'least-used'
+    fs.writeFileSync(
+      testStoreFile,
+      JSON.stringify({
+        version: 2,
+        accounts: {
+          alpha: {
+            alias: 'alpha',
+            accessToken: accessAlpha,
+            refreshToken: 'refresh-alpha',
+            expiresAt: Date.now() + 60_000,
+            usageCount: 0,
+            enabled: true
+          },
+          beta: {
+            alias: 'beta',
+            accessToken: accessBeta,
+            refreshToken: 'refresh-beta',
+            expiresAt: Date.now() + 60_000,
+            usageCount: 0,
+            enabled: true
+          }
+        },
+        activeAlias: null,
+        rotationIndex: 0,
+        lastRotation: 0,
+        forcedAlias: null,
+        forcedUntil: null,
+        previousRotationStrategy: null,
+        forcedBy: null,
+        rotationStrategy: 'least-used'
+      }, null, 2),
+      { mode: 0o600 }
+    )
+    fs.writeFileSync(
+      path.join(testDir, 'account-metrics.json'),
+      JSON.stringify({
+        version: 1,
+        updatedAt: 1_700_000_000_000,
+        metrics: {
+          alpha: { usageCount: 42, lastUsed: 1_700_000_200_000 },
+          beta: { usageCount: 1, lastUsed: 1_700_000_100_000 }
+        }
+      }, null, 2),
+      { mode: 0o600 }
+    )
+
+    mockGetNextAccount.mockResolvedValue({
+      account: {
+        alias: 'alpha',
+        accessToken: accessAlpha,
+        refreshToken: 'refresh-alpha',
+        expiresAt: Date.now() + 60_000,
+        usageCount: 1,
+        enabled: true
+      },
+      token: accessAlpha
+    } as any)
+
+    const hooks = await MultiAuthPlugin({
+      client: {},
+      $: (() => ({ nothrow: () => ({ catch: () => undefined }) })) as any,
+      serverUrl: new URL('http://localhost:3000'),
+      project: { id: 'test' },
+      directory: testDir
+    } as any)
+    const auth = await (hooks as any).auth.loader(async () => null as any, {} as any)
+    await auth.fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'gpt-5.4', stream: false })
+    })
+
+    const headers = callHeaders(mockFetch?.mock.calls[0] ?? [])
+    expect(headers['chatgpt-account-id']).toBe('acct-beta')
   })
 })

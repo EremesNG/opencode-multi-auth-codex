@@ -48,8 +48,13 @@ esmJest.unstable_mockModule('../../src/store.js', () => ({
   getStoreStatus: () => ({ locked: false, encrypted: false, error: null }),
   listAccounts: jest.fn(),
   loadStore,
+  loadStoreWithMetrics: loadStore,
   removeAccount: jest.fn(),
   updateAccount
+}))
+
+esmJest.unstable_mockModule('../../src/metrics-store.js', () => ({
+  registerMetricsFlushHooks: jest.fn()
 }))
 
 esmJest.unstable_mockModule('../../src/logger.js', () => ({

@@ -1,4 +1,5 @@
 import { loadStore, saveStore, updateAccount } from './store.js'
+import { getMetrics } from './metrics-store.js'
 import { logInfo, logError } from './logger.js'
 import {
   ALL_STICKY_IDENTITY_SOURCES,
@@ -366,10 +367,11 @@ export function applyPreset(
     // Weights based on limit health (normalized to percentages)
     accounts.forEach(alias => {
       const account = store.accounts[alias]
-      const fiveHourLimit = account.rateLimits?.fiveHour?.limit ?? 100
-      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
-      const weeklyLimit = account.rateLimits?.weekly?.limit ?? 1000
-      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
+      const rateLimits = getMetrics(alias)?.rateLimits ?? account.rateLimits
+      const fiveHourLimit = rateLimits?.fiveHour?.limit ?? 100
+      const fiveHourRemaining = rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
+      const weeklyLimit = rateLimits?.weekly?.limit ?? 1000
+      const weeklyRemaining = rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
       const fiveHourPct = fiveHourLimit > 0 ? (fiveHourRemaining / fiveHourLimit) * 100 : 50
       const weeklyPct = weeklyLimit > 0 ? (weeklyRemaining / weeklyLimit) * 100 : 50
       const health = (fiveHourPct + weeklyPct) / 2
@@ -386,10 +388,11 @@ export function applyPreset(
     // Favor accounts with high usage (lower remaining)
     accounts.forEach(alias => {
       const account = store.accounts[alias]
-      const fiveHourLimit = account.rateLimits?.fiveHour?.limit ?? 100
-      const fiveHourRemaining = account.rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
-      const weeklyLimit = account.rateLimits?.weekly?.limit ?? 1000
-      const weeklyRemaining = account.rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
+      const rateLimits = getMetrics(alias)?.rateLimits ?? account.rateLimits
+      const fiveHourLimit = rateLimits?.fiveHour?.limit ?? 100
+      const fiveHourRemaining = rateLimits?.fiveHour?.remaining ?? (fiveHourLimit / 2)
+      const weeklyLimit = rateLimits?.weekly?.limit ?? 1000
+      const weeklyRemaining = rateLimits?.weekly?.remaining ?? (weeklyLimit / 2)
       const fiveHourPct = fiveHourLimit > 0 ? (fiveHourRemaining / fiveHourLimit) * 100 : 50
       const weeklyPct = weeklyLimit > 0 ? (weeklyRemaining / weeklyLimit) * 100 : 50
       const health = (fiveHourPct + weeklyPct) / 2

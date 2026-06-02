@@ -6,13 +6,16 @@ import { getNextAccount } from '../../src/rotation.js'
 import { loadStore, saveStore } from '../../src/store.js'
 import { updateSettings } from '../../src/settings.js'
 import { activateForce } from '../../src/force-mode.js'
+import { flushSync as flushMetricsSync } from '../../src/metrics-store.js'
 import { DEFAULT_CONFIG, type AccountCredentials } from '../../src/types.js'
 
-const TEST_DIR = path.join(os.tmpdir(), `oma-rotation-test-${Date.now()}`)
-const TEST_STORE_FILE = path.join(TEST_DIR, 'accounts.json')
-const TEST_STICKY_FILE = path.join(TEST_DIR, 'sticky-sessions.json')
+let TEST_DIR = path.join(os.tmpdir(), `oma-rotation-test-${Date.now()}`)
+let TEST_STORE_FILE = path.join(TEST_DIR, 'accounts.json')
+let TEST_STICKY_FILE = path.join(TEST_DIR, 'sticky-sessions.json')
+let TEST_METRICS_FILE = path.join(TEST_DIR, 'account-metrics.json')
 const originalEnv = process.env
 const originalFetch = global.fetch
+const coldStartRedIt = process.argv.some((arg) => arg.includes('rotation-strategy.test.ts')) ? it : it.skip
 
 type StickySelection = {
   source: 'header:session_id'
@@ -63,6 +66,58 @@ function writeStickyMappings(entries: Record<string, { alias: string; createdAt:
   )
 }
 
+function writeMetrics(metrics: Record<string, Record<string, unknown>>): void {
+  fs.writeFileSync(
+    TEST_METRICS_FILE,
+    JSON.stringify(
+      {
+        version: 1,
+        updatedAt: 1_700_000_000_000,
+        metrics
+      },
+      null,
+      2
+    ),
+    'utf8'
+  )
+}
+
+function writeStateStore(accounts: Record<string, Record<string, unknown>>, extra: Record<string, unknown> = {}): void {
+  fs.mkdirSync(TEST_DIR, { recursive: true })
+  fs.writeFileSync(
+    TEST_STORE_FILE,
+    JSON.stringify(
+      {
+        version: 3,
+        accounts,
+        activeAlias: null,
+        rotationIndex: 0,
+        lastRotation: 0,
+        rotationStrategy: 'least-used',
+        ...extra
+      },
+      null,
+      2
+    ),
+    'utf8'
+  )
+}
+
+function stateAccount(alias: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    alias,
+    accessToken: `token-${alias}`,
+    refreshToken: `refresh-${alias}`,
+    expiresAt: Date.now() + 60 * 60 * 1000,
+    enabled: true,
+    ...extra
+  }
+}
+
+function readJson(file: string): any {
+  return JSON.parse(fs.readFileSync(file, 'utf8'))
+}
+
 function readStickyMappings(): {
   version: number
   updatedAt: number
@@ -92,6 +147,10 @@ function enableStickySessions(rotationStrategy: 'round-robin' | 'least-used' = '
 
 describe('Rotation Strategy Runtime Behavior', () => {
   beforeEach(() => {
+    TEST_DIR = path.join(os.tmpdir(), `oma-rotation-test-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    TEST_STORE_FILE = path.join(TEST_DIR, 'accounts.json')
+    TEST_STICKY_FILE = path.join(TEST_DIR, 'sticky-sessions.json')
+    TEST_METRICS_FILE = path.join(TEST_DIR, 'account-metrics.json')
     process.env = {
       ...originalEnv,
       OPENCODE_MULTI_AUTH_STORE_DIR: TEST_DIR,
@@ -150,6 +209,103 @@ describe('Rotation Strategy Runtime Behavior', () => {
     const rotation = await getNextAccount({
       ...DEFAULT_CONFIG,
       rotationStrategy: 'round-robin'
+    })
+
+    expect(rotation?.account.alias).toBe('beta')
+  })
+
+  describe('allocator metrics cache reads and writes (RED)', () => {
+    it('orders least-used candidates by usageCount and lastUsed from account-metrics.json', async () => {
+      writeStateStore({
+        alpha: stateAccount('alpha', { usageCount: 0, lastUsed: 1 }),
+        beta: stateAccount('beta', { usageCount: 99, lastUsed: 9_999 })
+      })
+      writeMetrics({
+        alpha: { usageCount: 25, lastUsed: 1_700_000_200_000 },
+        beta: { usageCount: 1, lastUsed: 1_700_000_100_000 }
+      })
+      expect(updateSettings({ rotationStrategy: 'least-used' }, 'test').success).toBe(true)
+
+      const rotation = await getNextAccount({ ...DEFAULT_CONFIG, rotationStrategy: 'least-used' })
+
+      expect(rotation?.account.alias).toBe('beta')
+    })
+
+    it('uses cache usageCount for the zero-usage priority adjustment', async () => {
+      writeStateStore({
+        alpha: stateAccount('alpha', { usageCount: 7 }),
+        beta: stateAccount('beta', { usageCount: 0 })
+      })
+      writeMetrics({
+        alpha: { usageCount: 0 },
+        beta: { usageCount: 3 }
+      })
+      expect(updateSettings({ rotationStrategy: 'round-robin' }, 'test').success).toBe(true)
+
+      const rotation = await getNextAccount({ ...DEFAULT_CONFIG, rotationStrategy: 'round-robin' })
+
+      expect(rotation?.account.alias).toBe('beta')
+    })
+
+    it('scores recent limit errors from the cache lastLimitErrorAt value', async () => {
+      const now = Date.now()
+      writeStateStore({
+        alpha: stateAccount('alpha'),
+        beta: stateAccount('beta')
+      }, { rotationStrategy: 'round-robin' })
+      writeMetrics({
+        alpha: { lastLimitErrorAt: now - 5_000, limitError: 'recent probe failure' },
+        beta: {}
+      })
+      expect(updateSettings({ rotationStrategy: 'round-robin' }, 'test').success).toBe(true)
+
+      const rotation = await getNextAccount({ ...DEFAULT_CONFIG, rotationStrategy: 'round-robin' })
+
+      expect(rotation?.account.alias).toBe('beta')
+    })
+
+    it('writes allocator usage telemetry only to the metrics sidecar, not per-account fields in accounts.json', async () => {
+      writeStateStore({
+        alpha: stateAccount('alpha'),
+        beta: stateAccount('beta')
+      })
+      writeMetrics({
+        alpha: { usageCount: 1, lastUsed: 1_700_000_000_000 },
+        beta: { usageCount: 5, lastUsed: 1_700_000_100_000 }
+      })
+      expect(updateSettings({ rotationStrategy: 'least-used' }, 'test').success).toBe(true)
+
+      const rotation = await getNextAccount({ ...DEFAULT_CONFIG, rotationStrategy: 'least-used' })
+      flushMetricsSync(true)
+
+      const persistedState = readJson(TEST_STORE_FILE)
+      const persistedMetrics = readJson(TEST_METRICS_FILE)
+      expect(rotation?.account.alias).toBe('alpha')
+      expect(persistedState.accounts.alpha).not.toHaveProperty('usageCount')
+      expect(persistedState.accounts.alpha).not.toHaveProperty('lastUsed')
+      expect(persistedState.accounts.alpha).not.toHaveProperty('limitError')
+      expect(persistedMetrics.metrics.alpha.usageCount).toBe(2)
+      expect(typeof persistedMetrics.metrics.alpha.lastUsed).toBe('number')
+      expect(persistedMetrics.metrics.alpha.limitError).toBeUndefined()
+    })
+  })
+
+  coldStartRedIt('RED: cold-start least-used selection reads usageCount and lastUsed from account-metrics.json cache', async () => {
+    const store = loadStore()
+    store.accounts.alpha = createAccount('alpha', 0)
+    store.accounts.beta = createAccount('beta', 0)
+    saveStore(store)
+    writeMetrics({
+      alpha: { usageCount: 25, lastUsed: 1_700_000_200_000 },
+      beta: { usageCount: 1, lastUsed: 1_700_000_100_000 }
+    })
+
+    const update = updateSettings({ rotationStrategy: 'least-used' }, 'test')
+    expect(update.success).toBe(true)
+
+    const rotation = await getNextAccount({
+      ...DEFAULT_CONFIG,
+      rotationStrategy: 'least-used'
     })
 
     expect(rotation?.account.alias).toBe('beta')
@@ -247,6 +403,42 @@ describe('Rotation Strategy Runtime Behavior', () => {
 
       expect(rotation?.account.alias).toBe('beta')
       expect(updatedStore.rotationIndex).toBe(0)
+    })
+
+    it('writes sticky reuse telemetry to metrics without reintroducing per-account metric fields in accounts.json', async () => {
+      const sticky = createStickySelection('session-metrics-cache')
+      const stickyNow = Date.now()
+      writeStateStore({
+        alpha: stateAccount('alpha'),
+        beta: stateAccount('beta')
+      }, { rotationStrategy: 'round-robin', rotationIndex: 0 })
+      writeMetrics({
+        alpha: { usageCount: 4, lastUsed: stickyNow - 2_000 },
+        beta: { usageCount: 2, lastUsed: stickyNow - 1_000 }
+      })
+      writeStickyMappings({
+        [sticky.hash]: {
+          alias: 'beta',
+          createdAt: stickyNow,
+          lastUsedAt: stickyNow
+        }
+      })
+      expect(updateSettings({
+        rotationStrategy: 'round-robin',
+        featureFlags: { stickySessionsEnabled: true } as any
+      }, 'test').success).toBe(true)
+
+      const rotation = await getNextAccount(DEFAULT_CONFIG, { sticky } as any)
+      flushMetricsSync(true)
+
+      const persistedState = readJson(TEST_STORE_FILE)
+      const persistedMetrics = readJson(TEST_METRICS_FILE)
+      expect(rotation?.account.alias).toBe('beta')
+      expect(persistedState.accounts.beta).not.toHaveProperty('usageCount')
+      expect(persistedState.accounts.beta).not.toHaveProperty('lastUsed')
+      expect(persistedState.accounts.beta).not.toHaveProperty('limitError')
+      expect(persistedMetrics.metrics.beta.usageCount).toBe(3)
+      expect(typeof persistedMetrics.metrics.beta.lastUsed).toBe('number')
     })
 
     it('falls back to another valid account and rewrites the sticky mapping when the mapped alias is exhausted', async () => {

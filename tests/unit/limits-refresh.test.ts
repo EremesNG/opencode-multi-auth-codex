@@ -14,6 +14,8 @@ const logError = jest.fn()
 const logInfo = jest.fn()
 const markAuthInvalid = jest.fn()
 const markWorkspaceDeactivated = jest.fn()
+const setMetrics = jest.fn()
+const updateRateLimits = jest.fn()
 
 esmJest.unstable_mockModule('../../src/store.js', () => ({
   loadStore,
@@ -36,6 +38,11 @@ esmJest.unstable_mockModule('../../src/logger.js', () => ({
 esmJest.unstable_mockModule('../../src/rotation.js', () => ({
   markAuthInvalid,
   markWorkspaceDeactivated
+}))
+
+esmJest.unstable_mockModule('../../src/metrics-store.js', () => ({
+  setMetrics,
+  updateRateLimits
 }))
 
 let refreshRateLimitsForAccount: typeof import('../../src/limits-refresh.js').refreshRateLimitsForAccount
@@ -76,7 +83,7 @@ describe('refreshRateLimitsForAccount', () => {
     expect(probeRateLimitsForAccount).not.toHaveBeenCalled()
     expect(markAuthInvalid).toHaveBeenCalledWith('dead-token')
     expect(markWorkspaceDeactivated).not.toHaveBeenCalled()
-    expect(updateAccount).toHaveBeenLastCalledWith(
+    expect(setMetrics).toHaveBeenCalledWith(
       'dead-token',
       expect.objectContaining({
         limitStatus: 'error',
@@ -84,6 +91,10 @@ describe('refreshRateLimitsForAccount', () => {
         lastLimitErrorAt: expect.any(Number),
         limitsConfidence: expect.any(String)
       })
+    )
+    expect(updateAccount).not.toHaveBeenCalledWith(
+      'dead-token',
+      expect.objectContaining({ limitStatus: expect.anything() })
     )
     expect(result).toEqual({
       alias: 'dead-token',
@@ -134,15 +145,32 @@ describe('refreshRateLimitsForAccount', () => {
     })
 
     expect(probeRateLimitsForAccount).not.toHaveBeenCalled()
-    expect(updateAccount).toHaveBeenLastCalledWith(
+    expect(updateRateLimits).toHaveBeenCalledWith(
+      'dead-token',
+      expect.objectContaining({
+        fiveHour: expect.objectContaining({ remaining: 50 }),
+        weekly: expect.objectContaining({ remaining: 80 })
+      })
+    )
+    expect(setMetrics).toHaveBeenCalledWith(
       'dead-token',
       expect.objectContaining({
         limitStatus: 'success',
+        limitError: undefined,
+        lastLimitProbeAt: expect.any(Number),
+        limitsConfidence: expect.any(String)
+      })
+    )
+    expect(updateAccount).toHaveBeenLastCalledWith(
+      'dead-token',
+      expect.objectContaining({
         authInvalid: false,
         authInvalidatedAt: undefined,
         planType: 'pro'
       })
     )
+    expect(updateAccount.mock.calls.at(-1)?.[1]).not.toHaveProperty('rateLimits')
+    expect(updateAccount.mock.calls.at(-1)?.[1]).not.toHaveProperty('limitStatus')
     expect(result).toEqual({ alias: 'dead-token', updated: true })
   })
 
@@ -163,9 +191,10 @@ describe('refreshRateLimitsForAccount', () => {
     expect(updateAccount).toHaveBeenLastCalledWith(
       'dead-token',
       expect.objectContaining({
-        limitStatus: 'success',
         rateLimitedUntil: undefined
       })
     )
+    expect(updateAccount.mock.calls.at(-1)?.[1]).not.toHaveProperty('rateLimits')
+    expect(updateAccount.mock.calls.at(-1)?.[1]).not.toHaveProperty('limitStatus')
   })
 })
