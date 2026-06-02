@@ -31,7 +31,6 @@
     "test:soak:48h": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/soak",
     "lint": "pnpm run typecheck"
   },
-  "dependencies": {},
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.0.150"
   },
@@ -68,7 +67,7 @@
     "oauth",
     "multi-account"
   ],
-  "packageManager": "pnpm@11.1.0",
+  "packageManager": "pnpm@11.5.0",
   "author": "a3fckx",
   "license": "MIT"
 }
