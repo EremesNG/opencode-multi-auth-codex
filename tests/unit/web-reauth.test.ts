@@ -39,6 +39,7 @@ esmJest.unstable_mockModule('../../src/codex-auth.js', () => ({
   getCodexAuthPath: () => AUTH_PATH,
   getCodexAuthStatus: () => ({ error: null }),
   getCodexAuthSummary: () => ({ hasAccessToken: false, hasRefreshToken: false, hasIdToken: false }),
+  getCodexActiveState: () => ({ status: 'missing', alias: null, hasAccessToken: false, hasRefreshToken: false, hasIdToken: false }),
   resolveAliasForCurrentAuth: () => null,
   syncCodexAuthFile,
   writeCodexAuthForAlias

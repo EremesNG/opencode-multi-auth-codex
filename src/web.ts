@@ -7,7 +7,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { exec, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createAuthorizationFlow, loginAccount, refreshToken } from './auth.js'
-import { getCodexAuthPath, getCodexAuthStatus, getCodexAuthSummary, resolveAliasForCurrentAuth, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js'
+import { getCodexActiveState, getCodexAuthPath, getCodexAuthStatus, getCodexAuthSummary, resolveAliasForCurrentAuth, syncCodexAuthFile, writeCodexAuthForAlias } from './codex-auth.js'
 import { getStoreStatus, listAccounts, loadStore, loadStoreWithMetrics, removeAccount, updateAccount } from './store.js'
 import { getRefreshQueueState, startRefreshQueue, stopRefreshQueue } from './refresh-queue.js'
 import { getLogPath, logError, logInfo, logWarn, readLogTail } from './logger.js'
@@ -22,15 +22,13 @@ import {
   updateStickySessionConfig
 } from './settings.js'
 import { Errors } from './errors.js'
-import type { AccountCredentials, RateLimitWindow, LimitsConfidence, RotationSettings, WeightPreset } from './types.js'
+import type { AccountCredentials, CodexActiveState, RateLimitWindow, LimitsConfidence, RotationSettings, WeightPreset } from './types.js'
 import { cleanupStickySessions, getStickySessionsStatus } from './sticky-sessions.js'
 import { registerMetricsFlushHooks } from './metrics-store.js'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 3434
 const LOCALHOST_HOST_PATTERN = /^(127\.0\.0\.1|::1|localhost)$/i
-const SYNC_INTERVAL_MS = 3000
-const SYNC_DEBOUNCE_MS = 600
 const ANTIGRAVITY_ACCOUNTS_FILE = path.join(os.homedir(), '.config', 'opencode', 'antigravity-accounts.json')
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 const AUTO_LOGIN_TIMEOUT_MS = 6 * 60 * 1000
@@ -197,7 +195,6 @@ async function serveSpaRequest(res: http.ServerResponse, requestPath: string): P
 let lastSyncAt = 0
 let lastSyncError: string | null = null
 let lastSyncAlias: string | null = null
-let syncTimer: NodeJS.Timeout | null = null
 let pendingLogin: PendingLoginState | null = null
 let lastLoginError: string | null = null
 let antigravityQuotaState: AntigravityQuotaState = { status: 'idle', scope: 'active' }
@@ -712,7 +709,19 @@ async function saveAutoLoginAccountAndStart(input: AutoLoginCreateInput): Promis
   return startAutoLogin(account.email)
 }
 
-function runSync(): void {
+type ManualCodexImportResult = {
+  ok: true
+  imported: boolean
+  alias: string | null
+  added: boolean
+  updated: boolean
+  authEmail?: string
+  authAccountId?: string
+  warning?: string
+  codexActive: CodexActiveState
+}
+
+function runSync(): ManualCodexImportResult {
   try {
     const result = syncCodexAuthFile()
     const authStatus = getCodexAuthStatus()
@@ -725,10 +734,33 @@ function runSync(): void {
     if (authStatus.error) {
       logError(authStatus.error)
     }
+    const codexActive = getCodexActiveState(loadStore())
+    return {
+      ok: true,
+      imported: Boolean(result.alias),
+      alias: result.alias ?? null,
+      added: result.added,
+      updated: result.updated,
+      authEmail: result.authEmail,
+      authAccountId: result.authAccountId,
+      warning: result.alias ? undefined : 'No importable Codex auth.json credentials found',
+      codexActive
+    }
   } catch (err) {
-    lastSyncError = String(err)
+    const errorMessage = getSanitizedErrorMessage(err)
+    lastSyncAt = Date.now()
+    lastSyncError = errorMessage
+    lastSyncAlias = null
     logError(`Sync failed: ${lastSyncError}`)
+    throw err
   }
+}
+
+function recordCodexImportError(message: string): void {
+  lastSyncAt = Date.now()
+  lastSyncError = message
+  lastSyncAlias = null
+  logError(message)
 }
 
 type AntigravityAccountView = {
@@ -1152,22 +1184,6 @@ async function refreshAntigravityQuota(): Promise<AntigravityQuotaState> {
   return antigravityQuotaInFlight
 }
 
-function scheduleSync(): void {
-  if (syncTimer) {
-    clearTimeout(syncTimer)
-  }
-  syncTimer = setTimeout(() => {
-    runSync()
-  }, SYNC_DEBOUNCE_MS)
-}
-
-function startAuthWatcher(): void {
-  const authPath = getCodexAuthPath()
-  fs.watchFile(authPath, { interval: SYNC_INTERVAL_MS }, () => {
-    scheduleSync()
-  })
-}
-
 export function startWebConsole(options?: { port?: number; host?: string }): http.Server {
   const host = options?.host || DEFAULT_HOST
   const port = options?.port || DEFAULT_PORT
@@ -1178,8 +1194,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
   }
 
   registerMetricsFlushHooks()
-  runSync()
-  startAuthWatcher()
+  logInfo('Codex auth.json auto-import is disabled; use POST /api/codex/import for manual import.')
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url || '/', `http://${host}:${port}`)
@@ -1188,11 +1203,11 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
     try {
 
     if (req.method === 'GET' && path === '/api/state') {
-      runSync()
       const store = loadStoreWithMetrics()
       const rawAccounts = Object.values(store.accounts)
       const accounts = rawAccounts.map(scrubAccount)
-      const deviceAlias = resolveAliasForCurrentAuth(store)
+      const codexActive = getCodexActiveState(store)
+      const deviceAlias = codexActive.status === 'matched' ? codexActive.alias : null
       const authSummary = getCodexAuthSummary()
       const storeStatus = getStoreStatus()
       // Phase G: Only load antigravity if feature is enabled
@@ -1206,6 +1221,7 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       sendJson(res, 200, {
         authPath: getCodexAuthPath(),
         deviceAlias,
+        codexActive,
         rotationAlias: store.activeAlias,
         accounts,
         lastSyncAt,
@@ -1241,6 +1257,23 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       const limit = limitParam ? Number(limitParam) : undefined
       const lines = readLogTail(Number.isFinite(limit) ? limit : undefined)
       sendJson(res, 200, { path: getLogPath(), lines })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/codex/import') {
+      const codexActive = getCodexActiveState()
+      if (codexActive.status === 'error') {
+        const message = codexActive.error || 'Failed to parse codex auth.json'
+        recordCodexImportError(message)
+        sendJson(res, 422, { ok: false, error: message, code: 'CODEX_AUTH_INVALID' })
+        return
+      }
+
+      try {
+        sendJson(res, 200, runSync())
+      } catch (err) {
+        sendJson(res, 500, { ok: false, error: getSanitizedErrorMessage(err), code: 'CODEX_AUTH_IMPORT_FAILED' })
+      }
       return
     }
 
@@ -1321,14 +1354,44 @@ export function startWebConsole(options?: { port?: number; host?: string }): htt
       return
     }
 
+    if (req.method === 'POST' && path === '/api/codex/use') {
+      const body = await readJsonBody(req)
+      const alias = typeof body.alias === 'string' ? body.alias.trim() : ''
+      if (!alias) {
+        sendJson(res, 400, { error: 'Missing alias', code: 'MISSING_ALIAS' })
+        return
+      }
+
+      const store = loadStore()
+      const account = store.accounts[alias]
+      if (!account) {
+        sendJson(res, 404, { error: 'Unknown alias', code: 'ACCOUNT_NOT_FOUND' })
+        return
+      }
+      if (!account.accessToken || !account.refreshToken) {
+        sendJson(res, 409, { error: 'Missing token data for alias', code: 'ACCOUNT_NOT_USABLE_IN_CODEX' })
+        return
+      }
+
+      try {
+        writeCodexAuthForAlias(alias)
+        sendJson(res, 200, { ok: true, alias, codexActive: getCodexActiveState(loadStore()) })
+      } catch (err) {
+        logError(`Failed to write Codex auth.json for ${alias}: ${getSanitizedErrorMessage(err)}`)
+        sendJson(res, 500, { error: 'Failed to write Codex auth.json', code: 'CODEX_AUTH_WRITE_FAILED' })
+      }
+      return
+    }
+
     if (req.method === 'POST' && path === '/api/switch') {
       const body = await readJsonBody(req)
-      if (!body.alias) {
+      const alias = typeof body.alias === 'string' ? body.alias.trim() : ''
+      if (!alias) {
         sendJson(res, 400, { error: 'Missing alias' })
         return
       }
       try {
-        writeCodexAuthForAlias(body.alias)
+        writeCodexAuthForAlias(alias)
         sendJson(res, 200, { ok: true })
       } catch (err) {
         sendJson(res, 400, { error: String(err) })

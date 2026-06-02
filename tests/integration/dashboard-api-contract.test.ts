@@ -3,6 +3,8 @@ import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type * as http from 'node:http'
+// @ts-ignore - ESM Jest globals are available at runtime in the test environment.
+import { jest } from '@jest/globals'
 import { dashboardAlphaMetrics, dashboardBetaMetrics, writeDashboardSandbox } from '../helpers/dashboard-seed.js'
 
 const SANDBOX_ROOT = path.join(os.tmpdir(), 'oma-dashboard-contract-sandbox')
@@ -55,6 +57,49 @@ function seedSandbox(): void {
 
 function readStore(): JsonRecord {
   return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')) as JsonRecord
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.signature`
+}
+
+function authClaims(alias: string, iat = 200, exp = 1_200): Record<string, unknown> {
+  return {
+    iat,
+    exp,
+    email: `${alias}@example.com`,
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: `acct-${alias}`,
+      chatgpt_account_user_id: `acct-user-${alias}`,
+      user_id: `user-${alias}`,
+      chatgpt_plan_type: 'plus'
+    }
+  }
+}
+
+function writeCodexAuth(alias: string, overrides: Partial<{ accessToken: string; refreshToken: string; idToken: string; accountId: string; iat: number; exp: number }> = {}): { accessToken: string; refreshToken: string; idToken: string } {
+  const accessToken = overrides.accessToken ?? jwt(authClaims(alias, overrides.iat, overrides.exp))
+  const idToken = overrides.idToken ?? jwt(authClaims(alias, overrides.iat, overrides.exp))
+  const refreshToken = overrides.refreshToken ?? `refresh-${alias}`
+  fs.writeFileSync(
+    AUTH_FILE,
+    JSON.stringify(
+      {
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken,
+          refresh_token: refreshToken,
+          id_token: idToken,
+          account_id: overrides.accountId ?? `acct-${alias}`
+        },
+        last_refresh: '2026-01-01T00:00:00.000Z'
+      },
+      null,
+      2
+    )
+  )
+  return { accessToken, refreshToken, idToken }
 }
 
 async function startServer(): Promise<{ server: http.Server; port: number }> {
@@ -119,9 +164,16 @@ describe('dashboard API contract parity', () => {
       })
       expect(state.body.storeStatus).toEqual({ locked: false, encrypted: false, error: null })
       expect(state.body.login).toBeNull()
-      expect(state.body.lastSyncAt).toEqual(expect.any(Number))
-      expect(state.body.lastSyncError).toBe('Missing access_token/refresh_token in auth.json')
+      expect(state.body.lastSyncAt).toBe(0)
+      expect(state.body.lastSyncError).toBeNull()
       expect(state.body.lastSyncAlias).toBeNull()
+      expect(state.body.codexActive).toEqual(expect.objectContaining({
+        status: 'missing',
+        alias: null,
+        hasAccessToken: false,
+        hasRefreshToken: false,
+        hasIdToken: false
+      }))
       expect(state.body.antigravity).toEqual({
         accounts: [],
         path: expect.any(String),
@@ -549,6 +601,184 @@ describe('dashboard API contract parity', () => {
       })
     } finally {
       await closeServer(server)
+    }
+  })
+
+  it('does not resurrect a deleted account during repeated state polling', async () => {
+    writeCodexAuth('beta', { accessToken: 'token-beta', refreshToken: 'refresh-beta' })
+    const { server, port } = await startServer()
+
+    try {
+      const removeBeta = await requestJson(port, '/api/remove', {
+        method: 'POST',
+        body: JSON.stringify({ alias: 'beta' })
+      })
+      expect(removeBeta).toEqual({ status: 200, body: { ok: true } })
+
+      for (let i = 0; i < 3; i += 1) {
+        const state = await requestJson(port, '/api/state')
+        expect(state.status).toBe(200)
+        expect(state.body.accounts.map((account: JsonRecord) => account.alias)).toEqual(['alpha'])
+        expect(readStore().accounts.beta).toBeUndefined()
+      }
+    } finally {
+      await closeServer(server)
+    }
+  })
+
+  it('imports Codex auth only from explicit manual endpoints and preserves legacy sync response shape', async () => {
+    const gammaTokens = writeCodexAuth('gamma')
+    const { server, port } = await startServer()
+
+    try {
+      const beforeImport = await requestJson(port, '/api/state')
+      expect(beforeImport.body.accounts.map((account: JsonRecord) => account.alias)).toEqual(['alpha', 'beta'])
+      expect(readStore().accounts.gamma).toBeUndefined()
+
+      const manualImport = await requestJson(port, '/api/codex/import', {
+        method: 'POST',
+        body: JSON.stringify({})
+      })
+      expect(manualImport.status).toBe(200)
+      expect(manualImport.body).toEqual(expect.objectContaining({
+        ok: true,
+        imported: true,
+        alias: 'gamma',
+        added: true,
+        updated: true,
+        codexActive: expect.objectContaining({ status: 'matched', alias: 'gamma' })
+      }))
+      expect(readStore().accounts.gamma).toEqual(expect.objectContaining({
+        accessToken: gammaTokens.accessToken,
+        refreshToken: gammaTokens.refreshToken,
+        source: 'codex'
+      }))
+
+      fs.writeFileSync(AUTH_FILE, '{bad-json')
+      const malformedImport = await requestJson(port, '/api/codex/import', {
+        method: 'POST',
+        body: JSON.stringify({})
+      })
+      expect(malformedImport).toEqual({
+        status: 422,
+        body: { ok: false, error: 'Failed to parse codex auth.json', code: 'CODEX_AUTH_INVALID' }
+      })
+
+      const afterMalformed = await requestJson(port, '/api/state')
+      expect(afterMalformed.body.lastSyncError).toBe('Failed to parse codex auth.json')
+      expect(afterMalformed.body.lastSyncAlias).toBeNull()
+
+      const legacySync = await requestJson(port, '/api/sync', {
+        method: 'POST',
+        body: JSON.stringify({})
+      })
+      expect(legacySync).toEqual({ status: 200, body: { ok: true } })
+    } finally {
+      await closeServer(server)
+    }
+  })
+
+  it('writes a stored account to Codex auth without changing rotation state', async () => {
+    const { server, port } = await startServer()
+    const beforeStore = readStore()
+
+    try {
+      const useBeta = await requestJson(port, '/api/codex/use', {
+        method: 'POST',
+        body: JSON.stringify({ alias: 'beta' })
+      })
+      expect(useBeta.status).toBe(200)
+      expect(useBeta.body).toEqual(expect.objectContaining({
+        ok: true,
+        alias: 'beta',
+        codexActive: expect.objectContaining({ status: 'matched', alias: 'beta' })
+      }))
+
+      const auth = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'))
+      expect(auth.tokens).toEqual(expect.objectContaining({
+        access_token: beforeStore.accounts.beta.accessToken,
+        refresh_token: beforeStore.accounts.beta.refreshToken
+      }))
+
+      const afterStore = readStore()
+      expect(afterStore.activeAlias).toBe(beforeStore.activeAlias)
+      expect(afterStore.rotationIndex).toBe(beforeStore.rotationIndex)
+      expect(afterStore.lastRotation).toBe(beforeStore.lastRotation)
+    } finally {
+      await closeServer(server)
+    }
+  })
+
+  it('refreshes device-alias tokens, writes Codex auth, and does not read back stale auth on poll', async () => {
+    const originalFetch = global.fetch
+    const oldTokens = { accessToken: 'token-alpha', refreshToken: 'refresh-alpha' }
+    fs.writeFileSync(
+      AUTH_FILE,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: oldTokens.accessToken,
+          refresh_token: oldTokens.refreshToken
+        },
+        last_refresh: '2026-01-01T00:00:00.000Z'
+      }, null, 2)
+    )
+    const newAccessToken = jwt(authClaims('alpha', 500, 1_500))
+    const newIdToken = jwt(authClaims('alpha', 500, 1_500))
+    global.fetch = jest.fn(async (input: any, init?: any) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url.includes('/oauth/token')) {
+        return new Response(JSON.stringify({
+          access_token: newAccessToken,
+          refresh_token: 'refresh-alpha-new',
+          id_token: newIdToken,
+          expires_in: 3600
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      return originalFetch(input as any, init)
+    }) as any
+
+    const { server, port } = await startServer()
+
+    try {
+      const refresh = await requestJson(port, '/api/token/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ alias: 'alpha' })
+      })
+      expect(refresh).toEqual({ status: 200, body: { ok: true, results: [{ alias: 'alpha', updated: true }] } })
+
+      expect(readStore().accounts.alpha).toEqual(expect.objectContaining({
+        accessToken: newAccessToken,
+        refreshToken: 'refresh-alpha-new',
+        idToken: newIdToken
+      }))
+      expect(JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8')).tokens).toEqual(expect.objectContaining({
+        access_token: newAccessToken,
+        refresh_token: 'refresh-alpha-new',
+        id_token: newIdToken
+      }))
+
+      fs.writeFileSync(
+        AUTH_FILE,
+        JSON.stringify({
+          OPENAI_API_KEY: null,
+          tokens: {
+            access_token: oldTokens.accessToken,
+            refresh_token: oldTokens.refreshToken
+          },
+          last_refresh: '2026-01-01T00:00:00.000Z'
+        }, null, 2)
+      )
+      const stateAfterStaleAuth = await requestJson(port, '/api/state')
+      expect(stateAfterStaleAuth.status).toBe(200)
+      expect(readStore().accounts.alpha).toEqual(expect.objectContaining({
+        accessToken: newAccessToken,
+        refreshToken: 'refresh-alpha-new',
+        idToken: newIdToken
+      }))
+    } finally {
+      await closeServer(server)
+      global.fetch = originalFetch
     }
   })
 })

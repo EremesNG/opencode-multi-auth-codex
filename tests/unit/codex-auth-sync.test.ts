@@ -25,6 +25,39 @@ function authClaims(iat: number, exp: number): Record<string, unknown> {
   }
 }
 
+function authClaimsFor(alias: string, iat: number, exp: number): Record<string, unknown> {
+  return {
+    iat,
+    exp,
+    email: `${alias}@example.com`,
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: `acct-${alias}`,
+      chatgpt_account_user_id: `acct-user-${alias}`,
+      user_id: `user-${alias}`,
+      chatgpt_plan_type: 'plus'
+    }
+  }
+}
+
+function writeAuthFile(sandboxRoot: string, alias: string, issuedAt = 200): { accessToken: string; idToken: string } {
+  const accessToken = jwt(authClaimsFor(alias, issuedAt, issuedAt + 1_000))
+  const idToken = jwt(authClaimsFor(alias, issuedAt, issuedAt + 1_000))
+  fs.writeFileSync(
+    path.join(sandboxRoot, 'auth.json'),
+    JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: {
+        access_token: accessToken,
+        refresh_token: `refresh-${alias}`,
+        id_token: idToken,
+        account_id: `acct-${alias}`
+      },
+      last_refresh: '2026-01-01T00:00:00.000Z'
+    })
+  )
+  return { accessToken, idToken }
+}
+
 async function loadSandboxModules(sandboxRoot: string) {
   jest.resetModules()
   process.env = {
@@ -165,5 +198,118 @@ describe('syncCodexAuthFile token freshness', () => {
       lastRefresh: expect.any(String),
       lastSeenAt: expect.any(Number)
     }))
+  })
+
+  it('reports matched Codex auth without mutating the store', async () => {
+    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    const { accessToken, idToken } = writeAuthFile(sandboxRoot, 'alpha')
+    store.addAccount('alpha', {
+      accessToken,
+      refreshToken: 'refresh-alpha',
+      idToken,
+      accountId: 'acct-alpha',
+      accountUserId: 'acct-user-alpha',
+      userId: 'user-alpha',
+      expiresAt: 1_200_000,
+      email: 'alpha@example.com',
+      source: 'opencode'
+    })
+    const beforeStore = fs.readFileSync(path.join(sandboxRoot, 'accounts.json'), 'utf8')
+
+    const state = codexAuth.getCodexActiveState()
+
+    expect(state).toEqual(expect.objectContaining({
+      status: 'matched',
+      alias: 'alpha',
+      email: 'alpha@example.com',
+      accountId: 'acct-alpha',
+      accountUserId: 'acct-user-alpha',
+      userId: 'user-alpha',
+      hasAccessToken: true,
+      hasRefreshToken: true,
+      hasIdToken: true
+    }))
+    expect(fs.readFileSync(path.join(sandboxRoot, 'accounts.json'), 'utf8')).toBe(beforeStore)
+  })
+
+  it('reports unknown Codex auth without adding a store account', async () => {
+    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    store.addAccount('alpha', {
+      accessToken: jwt(authClaimsFor('alpha', 100, 1_100)),
+      refreshToken: 'refresh-alpha',
+      expiresAt: 1_100_000,
+      email: 'alpha@example.com',
+      source: 'opencode'
+    })
+    writeAuthFile(sandboxRoot, 'gamma')
+    const beforeStore = readJson(path.join(sandboxRoot, 'accounts.json'))
+
+    const state = codexAuth.getCodexActiveState()
+
+    expect(state).toEqual(expect.objectContaining({
+      status: 'unknown',
+      alias: null,
+      email: 'gamma@example.com',
+      accountId: 'acct-gamma',
+      hasAccessToken: true,
+      hasRefreshToken: true,
+      hasIdToken: true
+    }))
+    expect(readJson(path.join(sandboxRoot, 'accounts.json'))).toEqual(beforeStore)
+  })
+
+  it('reports missing Codex auth for absent or empty auth.json without mutating the store', async () => {
+    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    store.addAccount('alpha', {
+      accessToken: jwt(authClaimsFor('alpha', 100, 1_100)),
+      refreshToken: 'refresh-alpha',
+      expiresAt: 1_100_000,
+      email: 'alpha@example.com',
+      source: 'opencode'
+    })
+    const beforeStore = readJson(path.join(sandboxRoot, 'accounts.json'))
+
+    expect(codexAuth.getCodexActiveState()).toEqual(expect.objectContaining({
+      status: 'missing',
+      alias: null,
+      hasAccessToken: false,
+      hasRefreshToken: false,
+      hasIdToken: false
+    }))
+
+    fs.writeFileSync(path.join(sandboxRoot, 'auth.json'), '   ')
+    expect(codexAuth.getCodexActiveState()).toEqual(expect.objectContaining({
+      status: 'missing',
+      alias: null,
+      hasAccessToken: false,
+      hasRefreshToken: false,
+      hasIdToken: false
+    }))
+    expect(readJson(path.join(sandboxRoot, 'accounts.json'))).toEqual(beforeStore)
+  })
+
+  it('reports malformed Codex auth as an error without mutating the store', async () => {
+    const { store, codexAuth } = await loadSandboxModules(sandboxRoot)
+    store.addAccount('alpha', {
+      accessToken: jwt(authClaimsFor('alpha', 100, 1_100)),
+      refreshToken: 'refresh-alpha',
+      expiresAt: 1_100_000,
+      email: 'alpha@example.com',
+      source: 'opencode'
+    })
+    fs.writeFileSync(path.join(sandboxRoot, 'auth.json'), '{not-json')
+    const beforeStore = readJson(path.join(sandboxRoot, 'accounts.json'))
+
+    const state = codexAuth.getCodexActiveState()
+
+    expect(state).toEqual(expect.objectContaining({
+      status: 'error',
+      alias: null,
+      hasAccessToken: false,
+      hasRefreshToken: false,
+      hasIdToken: false,
+      error: 'Failed to parse codex auth.json'
+    }))
+    expect(readJson(path.join(sandboxRoot, 'accounts.json'))).toEqual(beforeStore)
   })
 })

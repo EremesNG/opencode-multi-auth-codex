@@ -47,6 +47,24 @@ export interface AccountCredentials {
   source?: 'opencode' | 'codex'
 }
 
+export type CodexActiveStatus = 'matched' | 'unknown' | 'missing' | 'error'
+
+export interface CodexActiveState {
+  status: CodexActiveStatus
+  alias: string | null
+  email?: string
+  accountId?: string
+  accountUserId?: string
+  userId?: string
+  planType?: string
+  expiresAt?: number
+  lastRefresh?: string
+  hasAccessToken: boolean
+  hasRefreshToken: boolean
+  hasIdToken: boolean
+  error?: string
+}
+
 export interface RateLimitWindow {
   limit?: number
   remaining?: number

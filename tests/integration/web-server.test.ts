@@ -50,6 +50,84 @@ async function closeServer(server: http.Server): Promise<void> {
   })
 }
 
+function jwt(payload: Record<string, unknown>): string {
+  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.signature`
+}
+
+function authClaims(alias: string): Record<string, unknown> {
+  return {
+    iat: 200,
+    exp: 1_200,
+    email: `${alias}@example.com`,
+    'https://api.openai.com/auth': {
+      chatgpt_account_id: `acct-${alias}`,
+      chatgpt_account_user_id: `acct-user-${alias}`,
+      user_id: `user-${alias}`,
+      chatgpt_plan_type: 'plus'
+    }
+  }
+}
+
+function writeCodexAuth(alias: string): void {
+  fs.writeFileSync(
+    AUTH_FILE,
+    JSON.stringify(
+      {
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: jwt(authClaims(alias)),
+          refresh_token: `refresh-${alias}`,
+          id_token: jwt(authClaims(alias)),
+          account_id: `acct-${alias}`
+        },
+        last_refresh: '2026-01-01T00:00:00.000Z'
+      },
+      null,
+      2
+    )
+  )
+}
+
+function writeStoreWithAlphaOnly(): void {
+  fs.mkdirSync(SANDBOX_ROOT, { recursive: true })
+  fs.writeFileSync(
+    STORE_FILE,
+    JSON.stringify(
+      {
+        version: 3,
+        activeAlias: 'alpha',
+        rotationIndex: 0,
+        lastRotation: 1_700_000_000_000,
+        rotationStrategy: 'round-robin',
+        accounts: {
+          alpha: {
+            alias: 'alpha',
+            accessToken: 'token-alpha',
+            refreshToken: 'refresh-alpha',
+            expiresAt: Date.now() + 60_000,
+            email: 'alpha@example.com',
+            enabled: true,
+            source: 'opencode'
+          }
+        }
+      },
+      null,
+      2
+    )
+  )
+}
+
+async function requestJson(port: number, pathname: string): Promise<Record<string, any>> {
+  const response = await fetch(`http://127.0.0.1:${port}${pathname}`)
+  expect(response.status).toBe(200)
+  return (await response.json()) as Record<string, any>
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 beforeAll(async () => {
   if (fs.existsSync(SANDBOX_ROOT)) {
     fs.rmSync(SANDBOX_ROOT, { recursive: true, force: true })
@@ -210,6 +288,33 @@ describe('web server hardening', () => {
     } finally {
       await closeServer(server)
       process.env.OPENCODE_MULTI_AUTH_WEB_DIST_DIR = WEB_DIST_DIR
+      fs.unwatchFile(getCodexAuthPath())
+    }
+  })
+
+  it('does not auto-import Codex auth on startup or auth-file changes', async () => {
+    writeStoreWithAlphaOnly()
+    writeCodexAuth('gamma')
+    const port = await getFreePort()
+    const server = startWebConsole({ host: '127.0.0.1', port })
+
+    try {
+      await once(server, 'listening')
+
+      const startupState = await requestJson(port, '/api/state')
+      expect(startupState.accounts.map((account: Record<string, any>) => account.alias)).toEqual(['alpha'])
+      expect(JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')).accounts.gamma).toBeUndefined()
+
+      writeCodexAuth('delta')
+      await delay(3_300)
+
+      const afterAuthChangeState = await requestJson(port, '/api/state')
+      expect(afterAuthChangeState.accounts.map((account: Record<string, any>) => account.alias)).toEqual(['alpha'])
+      const store = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'))
+      expect(store.accounts.gamma).toBeUndefined()
+      expect(store.accounts.delta).toBeUndefined()
+    } finally {
+      await closeServer(server)
       fs.unwatchFile(getCodexAuthPath())
     }
   })
