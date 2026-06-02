@@ -215,6 +215,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 
 // Phase G: Sticky identity sources used for canonical request matching
 export type StickyIdentitySource =
+  | 'header:x-session-affinity'
+  | 'header:session-id'
   | 'header:session_id'
   | 'header:conversation_id'
   | 'body:metadata.session_id'
@@ -222,6 +224,8 @@ export type StickyIdentitySource =
   | 'body:prompt_cache_key'
 
 export const ALL_STICKY_IDENTITY_SOURCES: StickyIdentitySource[] = [
+  'header:x-session-affinity',
+  'header:session-id',
   'header:session_id',
   'header:conversation_id',
   'body:metadata.session_id',
@@ -257,6 +261,8 @@ export interface ResolvedStickyIdentity {
 // Phase G: Default sticky-session policy constants
 export const DEFAULT_STICKY_SESSION_SETTINGS: StickySessionSettings = {
   identitySources: [
+    'header:x-session-affinity',
+    'header:session-id',
     'header:session_id',
     'header:conversation_id',
     'body:metadata.session_id',

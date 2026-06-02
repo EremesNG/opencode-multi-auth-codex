@@ -22,6 +22,8 @@ import { getRuntimeSettings, getStickySessionRuntimeSettings } from './settings.
 import { listAccounts, updateAccount, loadStore } from './store.js'
 import { registerMetricsFlushHooks, updateRateLimits } from './metrics-store.js'
 import { resolveStickyIdentity } from './sticky-identity.js'
+import { hashStickyIdentity } from './sticky-sessions.js'
+import { logInfo } from './logger.js'
 import { extractErrorMessage, isCyberPolicyError } from './cyber-policy.js'
 import {
   DEFAULT_CONFIG,
@@ -631,12 +633,71 @@ const MultiAuthPlugin: Plugin = async ({ client, $, serverUrl, project, director
             const sticky = settings.settings.featureFlags?.stickySessionsEnabled
               ? (() => {
                   const stickySettings = getStickySessionRuntimeSettings()
-                  return resolveStickyIdentity({
-                    headers: new Headers(init?.headers || {}),
+                  const stickyHeaders = new Headers(init?.headers || {})
+                  const resolved = resolveStickyIdentity({
+                    headers: stickyHeaders,
                     body,
                     allowPromptCacheKey: stickySettings.allowPromptCacheKey,
                     identitySources: stickySettings.identitySources
                   })
+                  if (attempt === 1) {
+                    const present = {
+                      'header:session_id': Boolean(stickyHeaders.get('session_id')),
+                      'header:conversation_id': Boolean(stickyHeaders.get('conversation_id')),
+                      'body:metadata.session_id': Boolean(body?.metadata?.session_id),
+                      'body:metadata.conversation_id': Boolean(body?.metadata?.conversation_id),
+                      'body:prompt_cache_key': Boolean(body?.prompt_cache_key)
+                    }
+                    const presentList = Object.entries(present)
+                      .filter(([, v]) => v)
+                      .map(([k]) => k)
+                    const outcome = resolved
+                      ? `HIT source=${resolved.source} hash=${hashStickyIdentity(resolved.canonical).slice(0, 12)}`
+                      : 'MISS (no configured identity source present in request)'
+                    logInfo(
+                      `[sticky] identity resolution: ${outcome}; configured=[${stickySettings.identitySources.join(',')}] allowPromptCacheKey=${stickySettings.allowPromptCacheKey} present=[${presentList.join(',') || 'none'}]`
+                    )
+
+                    // Full diagnostic inventory: list every header + body identity candidate
+                    // (redacted to type + short hash, never raw values) to choose the
+                    // canonical identity source from evidence instead of guessing.
+                    const describeValue = (value: unknown): string => {
+                      if (value === undefined) return 'absent'
+                      if (value === null) return 'null'
+                      if (typeof value === 'string') {
+                        const trimmed = value.trim()
+                        if (trimmed.length === 0) return 'string(empty)'
+                        return `string(len=${trimmed.length},hash=${hashStickyIdentity(trimmed).slice(0, 12)})`
+                      }
+                      if (typeof value === 'object') return `object(keys=[${Object.keys(value as object).join(',') || 'none'}])`
+                      return `${typeof value}`
+                    }
+                    const headerKeys: string[] = []
+                    stickyHeaders.forEach((_, key) => headerKeys.push(key))
+                    const bodyTopKeys = body && typeof body === 'object' ? Object.keys(body) : []
+                    const metadata = body?.metadata
+                    const metadataKeys =
+                      metadata && typeof metadata === 'object' ? Object.keys(metadata as object) : []
+                    const idCandidates = [
+                      `header:session-id=${describeValue(stickyHeaders.get('session-id'))}`,
+                      `header:x-session-affinity=${describeValue(stickyHeaders.get('x-session-affinity'))}`,
+                      `header:originator=${describeValue(stickyHeaders.get('originator'))}`,
+                      `header:session_id=${describeValue(stickyHeaders.get('session_id'))}`,
+                      `header:conversation_id=${describeValue(stickyHeaders.get('conversation_id'))}`,
+                      `body.session_id=${describeValue((body as Record<string, unknown>)?.session_id)}`,
+                      `body.conversation_id=${describeValue((body as Record<string, unknown>)?.conversation_id)}`,
+                      `body.user=${describeValue((body as Record<string, unknown>)?.user)}`,
+                      `body.prompt_cache_key=${describeValue((body as Record<string, unknown>)?.prompt_cache_key)}`,
+                      `body.metadata.session_id=${describeValue((metadata as Record<string, unknown>)?.session_id)}`,
+                      `body.metadata.conversation_id=${describeValue((metadata as Record<string, unknown>)?.conversation_id)}`,
+                      `body.metadata.user_id=${describeValue((metadata as Record<string, unknown>)?.user_id)}`
+                    ]
+                    logInfo(
+                      `[sticky] request inventory: headerKeys=[${headerKeys.join(',') || 'none'}] bodyKeys=[${bodyTopKeys.join(',') || 'none'}] metadataKeys=[${metadataKeys.join(',') || 'none'}]`
+                    )
+                    logInfo(`[sticky] identity candidates: ${idCandidates.join(' | ')}`)
+                  }
+                  return resolved
                 })()
               : null
 

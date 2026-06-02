@@ -76,6 +76,8 @@ const mockFeatureFlags: FeatureFlagsResponse = {
 const mockStickyConfig = {
   enabled: true,
   identitySources: [
+    'header:x-session-affinity',
+    'header:session-id',
     'header:session_id',
     'header:conversation_id',
     'body:metadata.session_id',

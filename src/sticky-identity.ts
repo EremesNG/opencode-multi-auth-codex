@@ -46,6 +46,10 @@ export function resolveStickyIdentity(options: ResolveStickyIdentityOptions): Re
   for (const source of options.identitySources) {
     const value = (() => {
       switch (source) {
+        case 'header:x-session-affinity':
+          return options.headers.get('x-session-affinity')
+        case 'header:session-id':
+          return options.headers.get('session-id')
         case 'header:session_id':
           return options.headers.get('session_id')
         case 'header:conversation_id':

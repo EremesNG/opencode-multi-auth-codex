@@ -9,6 +9,8 @@ import type { StickyIdentitySource } from '../types/api'
 import './StickySessionPanel.css'
 
 const DEFAULT_IDENTITY_SOURCES: StickyIdentitySource[] = [
+  'header:x-session-affinity',
+  'header:session-id',
   'header:session_id',
   'header:conversation_id',
   'body:metadata.session_id',
@@ -215,14 +217,14 @@ export function StickySessionPanel(): JSX.Element {
             {showAdvanced && (
               <div id="advanced-options-content" className="sticky-session-advanced-content" role="region" aria-label="Advanced sticky session options">
                 <div className="sticky-session-field">
-                  <label className="sticky-session-label">
+                  <label className="sticky-session-label sticky-session-label--toggle">
                     <input
                       type="checkbox"
                       checked={allowPromptCacheKey}
                       onChange={e => setAllowPromptCacheKey(e.target.checked)}
                       aria-label="Allow prompt cache key as an advanced identity source"
                     />
-                    Allow prompt cache key as an identity source
+                    <span>Allow prompt cache key as an identity source</span>
                   </label>
                   <p className="sticky-session-help" id="allow-prompt-cache-help">
                     When enabled, <code>body:prompt_cache_key</code> can be selected as an identity source.

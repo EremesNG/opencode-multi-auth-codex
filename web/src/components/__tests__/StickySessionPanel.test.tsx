@@ -8,6 +8,8 @@ import type { StickySessionSettings, StickySessionStatus, StickySessionCleanupRe
 const mockConfig: StickySessionSettings = {
   enabled: true,
   identitySources: [
+    'header:x-session-affinity',
+    'header:session-id',
     'header:session_id',
     'header:conversation_id',
     'body:metadata.session_id',
@@ -112,9 +114,11 @@ describe('StickySessionPanel', () => {
     render(<StickySessionPanel />, { wrapper: createWrapper() })
 
     await waitFor(() =>
-      expect(screen.getByLabelText(/header:session_id/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/header:x-session-affinity/i)).toBeInTheDocument()
     )
 
+    expect(screen.getByLabelText(/header:session-id/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/header:session_id/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/header:conversation_id/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/body:metadata\.session_id/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/body:metadata\.conversation_id/i)).toBeInTheDocument()

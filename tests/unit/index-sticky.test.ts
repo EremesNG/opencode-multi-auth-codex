@@ -17,11 +17,15 @@ const mockMarkWorkspaceDeactivated = jest.fn()
 
 const defaultStickyConfig = {
   identitySources: [
+    'header:x-session-affinity',
+    'header:session-id',
     'header:session_id',
     'header:conversation_id',
     'body:metadata.session_id',
     'body:metadata.conversation_id'
   ] as Array<
+    'header:x-session-affinity' |
+    'header:session-id' |
     'header:session_id' |
     'header:conversation_id' |
     'body:metadata.session_id' |

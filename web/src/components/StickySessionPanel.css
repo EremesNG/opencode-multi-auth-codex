@@ -51,6 +51,20 @@
   height: 16px;
 }
 
+.sticky-session-label--toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.sticky-session-label--toggle input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin: 0;
+}
+
 .sticky-session-source-name {
   word-break: break-all;
   line-height: 1.4;

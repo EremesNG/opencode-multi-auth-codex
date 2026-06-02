@@ -260,6 +260,8 @@ export interface FeatureFlagsUpdateResponse extends ApiOkResponse {
 
 // Sticky-session additive contracts (Phase 4+)
 export type StickyIdentitySource =
+  | 'header:x-session-affinity'
+  | 'header:session-id'
   | 'header:session_id'
   | 'header:conversation_id'
   | 'body:metadata.session_id'

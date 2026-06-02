@@ -32,6 +32,9 @@
   --warning-subtle: rgba(245, 158, 11, 0.12);
   --error: #ef4444;
   --error-subtle: rgba(239, 68, 68, 0.12);
+  --error-strong: #dc2626;
+  --error-strong-hover: #b91c1c;
+  --on-error: #ffffff;
   --info: #3b82f6;
   --info-subtle: rgba(59, 130, 246, 0.12);
 
